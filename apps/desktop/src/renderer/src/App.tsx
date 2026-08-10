@@ -56,7 +56,7 @@ export function App() {
   const [settings, setSettings] = useState<AgentSettings>();
   const [memories, setMemories] = useState<Memory[]>([]);
   const [runtime] = useState<EvaRuntime>(() => configuredRuntime());
-  const [authenticationRequired, setAuthenticationRequired] = useState(() => configuredRuntime() === "cloud" && !localStorage.getItem("eva-cloud-token") && location.hostname.endsWith(".workers.dev"));
+  const [authenticationRequired, setAuthenticationRequired] = useState(() => configuredRuntime() === "cloud" && !localStorage.getItem("eva-cloud-token"));
   const [theme, setTheme] = useState<"light" | "dark">(() => localStorage.getItem("eva-theme") === "light" ? "light" : "dark");
   const [showToolCalls, setShowToolCalls] = useState(() => localStorage.getItem("eva-show-tool-calls") !== "false");
 
