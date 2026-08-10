@@ -59,6 +59,7 @@ export class FakeAgentBackend implements AgentBackend {
     const controller = new AbortController();
     this.controllers.set(chat.id, controller);
     const demoTool = /\b(tool|command|installed|claude)\b/i.test(prompt);
+    const demoPlan = /\b(plan|steps)\b/i.test(prompt);
     const response = demoTool
       ? "I checked the command and confirmed the local installation details."
       : `I’m Eva. You said: “${prompt}”`;
@@ -70,6 +71,12 @@ export class FakeAgentBackend implements AgentBackend {
         const output = "/Users/eva/.local/bin/claude\n2.1.222";
         onToolActivity({ phase: "update", id, output });
         onToolActivity({ phase: "end", id, output, isError: false });
+      }
+      if (demoPlan) {
+        const id = `demo-${crypto.randomUUID()}`;
+        const input = { title: "Eva plan", steps: [{ id: "understand", label: "Understand the request", status: "complete" }, { id: "deliver", label: "Deliver the result", status: "running" }] };
+        onToolActivity({ phase: "start", id, name: "present_plan", input });
+        onToolActivity({ phase: "end", id, output: "Presented plan in Eva.", isError: false });
       }
       for (const token of response.split(/(?<=\s)/)) {
         if (controller.signal.aborted) throw new Error("ABORTED");

@@ -9,8 +9,8 @@ const chat: Chat = {
   createdAt: timestamp,
   updatedAt: timestamp,
   messages: [
-    { id: "user-1", role: "user", content: "Inspect a file", status: "complete", createdAt: timestamp },
-    { id: "assistant-1", role: "assistant", content: "Done", status: "complete", createdAt: timestamp },
+    { id: "user-1", role: "user", content: "Inspect a file", status: "complete", createdAt: timestamp, uiBlocks: [] },
+    { id: "assistant-1", role: "assistant", content: "Done", status: "complete", createdAt: timestamp, uiBlocks: [] },
   ],
   toolCalls: [{
     id: "tool-1",

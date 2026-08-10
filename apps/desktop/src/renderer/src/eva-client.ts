@@ -92,7 +92,7 @@ export class EvaClient {
   private async connectCloud(): Promise<void> {
     if (this.closed) return;
     const connection = cloudConnection(this.cloudConfiguration);
-    const socket = new WebSocket(connection.url, connection.token ? ["eva-v2", `eva-token.${connection.token}`] : ["eva-v2"]);
+    const socket = new WebSocket(connection.url, connection.token ? ["eva-v3", `eva-token.${connection.token}`] : ["eva-v3"]);
     this.cloudSocket = socket;
     socket.addEventListener("open", () => {
       this.cloudConnected = true;
@@ -196,6 +196,7 @@ export class EvaClient {
         turnId: event.payload.turnId,
         content: event.payload.content,
         status: event.payload.status,
+        uiBlocks: event.payload.uiBlocks,
       }));
       return;
     }

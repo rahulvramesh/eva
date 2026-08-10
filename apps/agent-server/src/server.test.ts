@@ -79,6 +79,27 @@ describe("AgentServer", () => {
     expect(events.some((event) => event.type === "tool.update" && event.payload.toolCall.status === "complete")).toBe(true);
   });
 
+  it("persists and broadcasts model-selected generative UI", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
+    const repository = new ChatRepository(directory);
+    const server = new AgentServer({ host: "127.0.0.1", port: 0, token: "test-token", repository, backend: new FakeAgentBackend() });
+    const port = await server.listen();
+    cleanup.push(async () => { await server.close(); await rm(directory, { recursive: true, force: true }); });
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+    cleanup.push(async () => socket.close());
+    const events: ServerEvent[] = [];
+    socket.on("message", (data) => events.push(JSON.parse(data.toString()) as ServerEvent));
+    await waitFor(() => events.some((event) => event.type === "server.hello"));
+    socket.send(JSON.stringify(command("chat.create", {})));
+    const chat = (await findEvent(events, "chat.created")).payload.chat;
+    socket.send(JSON.stringify(command("message.send", { chatId: chat.id, content: "Make a plan for this" })));
+    await waitFor(() => events.some((event) => event.type === "run.status" && event.payload.status === "idle"));
+    const restored = await repository.get(chat.id);
+    expect(restored.messages.at(-1)?.uiBlocks[0]).toMatchObject({ kind: "plan", title: "Eva plan" });
+    expect(events.some((event) => event.type === "message.updated" && event.payload.message.uiBlocks.some((block) => block.kind === "plan"))).toBe(true);
+    expect(restored.toolCalls.some((tool) => tool.name === "present_plan")).toBe(false);
+  });
+
   it("runs separate chats concurrently and aborts only the selected chat", async () => {
     const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
     const repository = new ChatRepository(directory);
@@ -201,8 +222,8 @@ describe("AgentServer", () => {
       createdAt: timestamp,
       updatedAt: timestamp,
       messages: [
-        { id: "user-1", role: "user", content: "Check the command", status: "complete", createdAt: timestamp },
-        { id: "assistant-1", role: "assistant", content: "", status: "streaming", createdAt: timestamp },
+        { id: "user-1", role: "user", content: "Check the command", status: "complete", createdAt: timestamp, uiBlocks: [] },
+        { id: "assistant-1", role: "assistant", content: "", status: "streaming", createdAt: timestamp, uiBlocks: [] },
       ],
       toolCalls: [],
     };

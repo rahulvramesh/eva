@@ -27,6 +27,12 @@ export function appendMessage(chat: Chat, message: ChatMessage): Chat {
   return { ...chat, messages: [...chat.messages, message] };
 }
 
+export function upsertMessage(chat: Chat, message: ChatMessage): Chat {
+  return chat.messages.some((candidate) => candidate.id === message.id)
+    ? { ...chat, messages: chat.messages.map((candidate) => candidate.id === message.id ? message : candidate) }
+    : { ...chat, messages: [...chat.messages, message] };
+}
+
 export function appendAssistantDelta(chat: Chat, messageId: string, delta: string): Chat {
   return {
     ...chat,
@@ -45,9 +51,9 @@ export function upsertToolCall(chat: Chat, toolCall: ToolCall): Chat {
   };
 }
 
-export function completeAssistantMessage(chat: Chat, messageId: string, content: string, status: ChatMessage["status"]): Chat {
+export function completeAssistantMessage(chat: Chat, messageId: string, content: string, status: ChatMessage["status"], uiBlocks?: ChatMessage["uiBlocks"]): Chat {
   return {
     ...chat,
-    messages: chat.messages.map((message) => message.id === messageId ? { ...message, content, status } : message),
+    messages: chat.messages.map((message) => message.id === messageId ? { ...message, content, status, uiBlocks: uiBlocks ?? message.uiBlocks } : message),
   };
 }

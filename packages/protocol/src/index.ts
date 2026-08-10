@@ -1,12 +1,67 @@
 import { z } from "zod";
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 export const MAX_CONCURRENT_CHATS = 3;
 
 export const executionHostSchema = z.enum(["cloud", "device"]);
 export type ExecutionHost = z.infer<typeof executionHostSchema>;
 export const routingPolicySchema = z.enum(["auto", "cloud", "device", "private"]);
 export type RoutingPolicy = z.infer<typeof routingPolicySchema>;
+
+const uiBlockBaseSchema = z.object({ id: z.string().uuid(), createdAt: z.string() });
+const uiReminderBlockSchema = uiBlockBaseSchema.extend({
+  kind: z.literal("reminder"),
+  reminderId: z.string().uuid(),
+  title: z.string().min(1).max(200),
+  notes: z.string().max(4_000).default(""),
+  runAt: z.string(),
+  timezone: z.string().min(1).max(100),
+  recurrence: z.enum(["none", "daily", "weekly", "monthly"]),
+  appEnabled: z.boolean(),
+  emailEnabled: z.boolean(),
+  status: z.enum(["active", "paused", "completed"]),
+});
+const uiApprovalBlockSchema = uiBlockBaseSchema.extend({
+  kind: z.literal("approval"),
+  toolCallId: z.string(),
+  title: z.string().min(1).max(200),
+  description: z.string().max(2_000),
+  risk: z.enum(["low", "medium", "high"]).default("medium"),
+});
+const uiPlanBlockSchema = uiBlockBaseSchema.extend({
+  kind: z.literal("plan"),
+  title: z.string().min(1).max(200),
+  steps: z.array(z.object({
+    id: z.string().min(1).max(100),
+    label: z.string().min(1).max(500),
+    status: z.enum(["pending", "running", "complete", "error"]).default("pending"),
+  })).min(1).max(20),
+});
+const uiChoiceBlockSchema = uiBlockBaseSchema.extend({
+  kind: z.literal("choice"),
+  question: z.string().min(1).max(1_000),
+  options: z.array(z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(300), description: z.string().max(1_000).optional() })).min(2).max(10),
+  allowMultiple: z.boolean().default(false),
+  selected: z.array(z.string()).max(10).default([]),
+  status: z.enum(["awaiting", "submitted"]).default("awaiting"),
+});
+const uiTableValueSchema = z.union([z.string().max(4_000), z.number(), z.boolean(), z.null()]);
+const uiTableBlockSchema = uiBlockBaseSchema.extend({
+  kind: z.literal("table"),
+  title: z.string().max(200).optional(),
+  columns: z.array(z.object({ key: z.string().min(1).max(100), label: z.string().min(1).max(200) })).min(1).max(12),
+  rows: z.array(z.record(z.string(), uiTableValueSchema)).max(100),
+  caption: z.string().max(1_000).optional(),
+});
+
+export const uiBlockSchema = z.discriminatedUnion("kind", [
+  uiReminderBlockSchema,
+  uiApprovalBlockSchema,
+  uiPlanBlockSchema,
+  uiChoiceBlockSchema,
+  uiTableBlockSchema,
+]);
+export type UiBlock = z.infer<typeof uiBlockSchema>;
 
 export const messageSchema = z.object({
   id: z.string(),
@@ -18,6 +73,7 @@ export const messageSchema = z.object({
   deviceId: z.string().optional(),
   model: z.string().optional(),
   private: z.boolean().optional(),
+  uiBlocks: z.array(uiBlockSchema).max(20).default([]),
 });
 
 export type ChatMessage = z.infer<typeof messageSchema>;
@@ -176,6 +232,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     turnId: z.string(),
     content: z.string().max(1_000_000),
     status: z.enum(["complete", "aborted", "error"]),
+    uiBlocks: z.array(uiBlockSchema).max(20).default([]),
     sessionFile: z.string().optional(),
   }),
   commandBase.extend({
@@ -190,6 +247,13 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   commandBase.extend({ type: z.literal("run.abort"), chatId: z.string() }),
   commandBase.extend({ type: z.literal("tool.approve"), toolCallId: z.string() }),
   commandBase.extend({ type: z.literal("tool.reject"), toolCallId: z.string() }),
+  commandBase.extend({
+    type: z.literal("ui.choice.submit"),
+    chatId: z.string(),
+    messageId: z.string(),
+    blockId: z.string().uuid(),
+    selected: z.array(z.string().min(1).max(100)).min(1).max(10),
+  }),
   commandBase.extend({ type: z.literal("settings.get") }),
   commandBase.extend({
     type: z.literal("settings.update"),
@@ -258,6 +322,7 @@ type EventPayloads = {
   "chat.created": { chat: Chat };
   "chat.snapshot": { chat: Chat };
   "message.append": { chatId: string; message: ChatMessage };
+  "message.updated": { chatId: string; message: ChatMessage };
   "assistant.delta": { chatId: string; messageId: string; delta: string };
   "tool.call": { chatId: string; toolCall: ToolCall };
   "tool.update": { chatId: string; toolCall: ToolCall };
@@ -280,7 +345,7 @@ type EventPayloads = {
   "device.settings.update": { deviceId: string; provider: string; modelId: string; thinkingLevel: ThinkingLevel; systemInstructions: string };
   "device.turn.delta": { turnId: string; chatId: string; messageId: string; delta: string };
   "device.turn.tool": { turnId: string; chatId: string; toolCall: ToolCall };
-  "device.turn.complete": { turnId: string; chatId: string; messageId: string; content: string; status: "complete" | "aborted" | "error" };
+  "device.turn.complete": { turnId: string; chatId: string; messageId: string; content: string; status: "complete" | "aborted" | "error"; uiBlocks: UiBlock[] };
   "route.status": { chatId: string; turnId: string; host: ExecutionHost; deviceId?: string; model?: string; private: boolean; status: "queued" | "running" | "complete" | "error" };
   "sync.turn.ack": { chatId: string; assistantMessageId: string };
   "server.error": { code: string; message: string; requestId?: string };

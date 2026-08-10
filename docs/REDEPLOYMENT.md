@@ -112,7 +112,7 @@ pnpm exec wrangler d1 migrations list eva-cloud-production --remote
 
 Do not commit database exports; they can contain chats, memories, email addresses and notification content.
 
-For a completely new database, `pnpm cloud:migrate` applies `0001_initial.sql`, `0002_hybrid_provenance.sql`, `0003_reminders.sql`, and `0004_notification_timezone.sql` in order.
+For a completely new database, `pnpm cloud:migrate` applies every numbered file in `migrations/d1` in order. Migration `0005_generative_ui.sql` adds typed UI blocks to messages with a backward-compatible empty-array default.
 
 ## 6. Deploy and verify
 
@@ -144,6 +144,8 @@ pnpm package:windows      # Windows x64 NSIS installer
 ```
 
 Connect each desktop installation to the deployed Worker endpoint and owner token. Verify the global shortcut, tray menu, a cloud chat, a local file task, and a native reminder notification.
+
+For generative UI acceptance, ask Eva to present a two-option decision, submit one option, reload the chat, and confirm the card remains submitted. Also verify a plan through a connected Pi device and a cloud reminder/approval card. Invalid or unknown block JSON must never render.
 
 ## Restore and rollback
 

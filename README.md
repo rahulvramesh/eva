@@ -18,6 +18,7 @@ Eva is a lightweight personal assistant built as a compact Electron window. One 
 - **Private** requires a verified on-device Pi model such as Ollama and never silently falls back to cloud inference. Chats still sync unless the computer is offline.
 - Offline chats run through Pi and enter an outbox. Responses sync after reconnect; local command output is redacted by default unless **Offline Tool Output Sync** is enabled.
 - Create one-time or recurring reminders from chat or **Assistant Settings → Reminders**. Cloudflare owns the schedule, so app and email reminders continue while Eva Desktop or the computer is offline.
+- Eva can render plans, choices, comparison tables, reminders, and approval requests as persistent native cards. The model selects only validated schemas; it cannot generate executable UI code.
 
 Eva uses the current `@earendil-works/pi-coding-agent` SDK and the Pi credentials already configured on the machine. If Pi is not configured, run `pi` in a terminal and use `/login` first.
 
@@ -36,7 +37,7 @@ Eva Cloud provides the canonical synced chat and automatically discovers connect
 - each user gets a credential-less, prefix-scoped R2 mount at `/workspace/data` so cloud Bash files survive container sleep;
 - `web_fetch` accepts public HTTP(S) text/JSON/XML, revalidates redirects, blocks local/private targets, and bounds time and response size.
 - device execution uses an outbound-only authenticated WebSocket; no inbound port, router configuration, or Cloudflare Tunnel to the laptop is required;
-- protocol v2 streams device model capabilities, route provenance, tool events, cancellation, presence, and idempotent offline-turn imports.
+- protocol v3 streams device model capabilities, route provenance, tool events, typed generative UI, cancellation, presence, and idempotent offline-turn imports.
 - a separate per-user Reminder Scheduler Durable Object wakes for one-time and recurring reminders; D1 persists schedules, runs, notification history, and delivery preferences;
 - native Electron notifications and Cloudflare Email Service deliver reminders through the app and `reminders@notify.tarx.app`.
 
@@ -71,7 +72,7 @@ pnpm cloud:migrate
 pnpm cloud:deploy
 ```
 
-The complete reproducible setup, migration, validation, rollback, and reminder email instructions are in [`docs/REDEPLOYMENT.md`](docs/REDEPLOYMENT.md). Reminder behavior and failure semantics are in [`docs/REMINDERS.md`](docs/REMINDERS.md).
+The complete reproducible setup, migration, validation, rollback, and reminder email instructions are in [`docs/REDEPLOYMENT.md`](docs/REDEPLOYMENT.md). Reminder behavior and failure semantics are in [`docs/REMINDERS.md`](docs/REMINDERS.md). The typed UI contract, security boundary, lifecycle, and extension checklist are in [`docs/GENERATIVE_UI.md`](docs/GENERATIVE_UI.md).
 
 For Cloudflare Access, add both secrets and put an Access policy in front of the Worker. Token authentication remains useful for Electron and recovery:
 

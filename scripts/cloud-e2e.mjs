@@ -11,7 +11,7 @@ const skipBash = process.env.EVA_E2E_SKIP_BASH === "1";
 const bashCommand = process.env.EVA_E2E_KEEP_WORKSPACE_FILE === "1"
   ? "printf EVA_SANDBOX_OK > eva-sandbox-e2e.txt && cat eva-sandbox-e2e.txt"
   : "printf EVA_SANDBOX_OK > eva-sandbox-e2e.txt && cat eva-sandbox-e2e.txt && rm eva-sandbox-e2e.txt";
-const socket = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/api/ws`, ["eva-v2", `eva-token.${token}`]);
+const socket = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/api/ws`, ["eva-v3", `eva-token.${token}`]);
 const received = [];
 const waiters = [];
 
@@ -49,7 +49,7 @@ function waitFor(predicate, label) {
 }
 
 function send(type, payload = {}) {
-  socket.send(JSON.stringify({ version: 2, requestId: crypto.randomUUID(), type, ...payload }));
+  socket.send(JSON.stringify({ version: 3, requestId: crypto.randomUUID(), type, ...payload }));
 }
 
 async function run() {
@@ -57,7 +57,7 @@ async function run() {
 
   send("settings.get");
   const settings = await waitFor((event) => event.type === "settings.snapshot", "settings");
-  if (settings.payload.settings.selectedModel.provider !== "cloudflare") throw new Error("Cloud model settings were not loaded.");
+  if (!settings.payload.settings.models.some((model) => model.provider === "cloudflare")) throw new Error("Cloud model settings were not loaded.");
 
   send("memory.list");
   const existingMemory = await waitFor((event) => event.type === "memory.snapshot", "existing memory snapshot");
@@ -125,6 +125,26 @@ async function run() {
   const chatText = chatDeltas.map((event) => event.payload.delta).join("");
   if (!chatText.includes("EVA_CLOUD_CHAT_OK")) throw new Error(`Unexpected chat response: ${chatText}`);
   if (chatDeltas.length < 2) throw new Error(`Workers AI response was not incrementally streamed (${chatDeltas.length} delta).`);
+
+  received.length = 0;
+  send("message.send", {
+    chatId,
+    content: "Use the present_choice tool to ask me to choose a deployment target. Give exactly two options with IDs local and cloud. Do not use a Markdown list.",
+    routing: "cloud",
+  });
+  const choiceEvent = await waitFor(
+    (event) => event.type === "message.updated" && event.payload.chatId === chatId && event.payload.message.uiBlocks?.some((block) => block.kind === "choice"),
+    "generative choice card",
+  );
+  const choiceBlock = choiceEvent.payload.message.uiBlocks.find((block) => block.kind === "choice");
+  await waitFor((event) => event.type === "run.status" && event.payload.chatId === chatId && event.payload.status === "idle", "choice prompt completion");
+  received.length = 0;
+  send("ui.choice.submit", { chatId, messageId: choiceEvent.payload.message.id, blockId: choiceBlock.id, selected: ["cloud"] });
+  await waitFor(
+    (event) => event.type === "message.updated" && event.payload.message.id === choiceEvent.payload.message.id && event.payload.message.uiBlocks.some((block) => block.id === choiceBlock.id && block.status === "submitted"),
+    "persisted choice submission",
+  );
+  await waitFor((event) => event.type === "run.status" && event.payload.chatId === chatId && event.payload.status === "idle", "choice follow-up completion");
 
   send("chat.create");
   const concurrentA = await waitFor(

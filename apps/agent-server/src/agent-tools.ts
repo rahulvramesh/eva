@@ -26,7 +26,36 @@ export function createEvaTools(cwd: string) {
       }
     : bash;
 
-  return [defineTool(shellTool), createWebFetchTool()];
+  return [defineTool(shellTool), createWebFetchTool(), ...createGenerativeUiTools()];
+}
+
+function createGenerativeUiTools() {
+  const present = (name: string, label: string, description: string, parameters: ReturnType<typeof Type.Object>) => defineTool({
+    name,
+    label,
+    description,
+    promptSnippet: description,
+    promptGuidelines: ["Use this tool when a structured interactive presentation is clearer than plain text. Do not duplicate the same data in Markdown."],
+    parameters,
+    execute: async (_toolCallId, input) => ({ content: [{ type: "text" as const, text: `Presented ${name.replace("present_", "")} in Eva.` }], details: input }),
+  });
+  return [
+    present("present_plan", "Plan", "Present a concise task plan with progress states.", Type.Object({
+      title: Type.String(),
+      steps: Type.Array(Type.Object({ id: Type.String(), label: Type.String(), status: Type.Optional(Type.Union([Type.Literal("pending"), Type.Literal("running"), Type.Literal("complete"), Type.Literal("error")])) }), { minItems: 1, maxItems: 20 }),
+    })),
+    present("present_choice", "Choice", "Ask the user to choose from two or more explicit options.", Type.Object({
+      question: Type.String(),
+      options: Type.Array(Type.Object({ id: Type.String(), label: Type.String(), description: Type.Optional(Type.String()) }), { minItems: 2, maxItems: 10 }),
+      allowMultiple: Type.Optional(Type.Boolean()),
+    })),
+    present("present_table", "Table", "Present structured comparison data as a compact table.", Type.Object({
+      title: Type.Optional(Type.String()),
+      columns: Type.Array(Type.Object({ key: Type.String(), label: Type.String() }), { minItems: 1, maxItems: 12 }),
+      rows: Type.Array(Type.Record(Type.String(), Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()])), { maxItems: 100 }),
+      caption: Type.Optional(Type.String()),
+    })),
+  ];
 }
 
 export function resolveWindowsShell(

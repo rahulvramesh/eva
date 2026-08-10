@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   PROTOCOL_VERSION,
   clientCommandSchema,
+  uiBlockSchema,
   type AgentSettings,
   type ChatMessage,
   type ClientCommand,
@@ -14,6 +15,7 @@ import {
   type ServerEvent,
   type ServerEventType,
   type ToolCall,
+  type UiBlock,
 } from "../../../packages/protocol/src/index";
 import {
   appendMessage,
@@ -90,6 +92,9 @@ const scheduleReminderInputSchema = z.object({
   app: z.boolean().default(true),
   email: z.boolean().default(false),
 });
+const presentPlanInputSchema = z.object({ title: z.string().min(1).max(200), steps: z.array(z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(500), status: z.enum(["pending", "running", "complete", "error"]).default("pending") })).min(1).max(20) });
+const presentChoiceInputSchema = z.object({ question: z.string().min(1).max(1_000), options: z.array(z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(300), description: z.string().max(1_000).optional() })).min(2).max(10), allowMultiple: z.boolean().default(false) });
+const presentTableInputSchema = z.object({ title: z.string().max(200).optional(), columns: z.array(z.object({ key: z.string().min(1).max(100), label: z.string().min(1).max(200) })).min(1).max(12), rows: z.array(z.record(z.string(), z.union([z.string().max(4_000), z.number(), z.boolean(), z.null()]))).max(100), caption: z.string().max(1_000).optional() });
 
 const MODEL_TOOLS = [
   {
@@ -160,6 +165,54 @@ const MODEL_TOOLS = [
       parameters: { type: "object", properties: { reminder_id: { type: "string" } }, required: ["reminder_id"] },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "present_plan",
+      description: "Present a concise task plan with explicit progress states. Use this instead of a Markdown checklist when tracking work.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          steps: { type: "array", items: { type: "object", properties: { id: { type: "string" }, label: { type: "string" }, status: { type: "string", enum: ["pending", "running", "complete", "error"] } }, required: ["id", "label"] } },
+        },
+        required: ["title", "steps"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "present_choice",
+      description: "Ask the user to select from clear options. Use it when the next step depends on a user decision.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: { type: "string" },
+          options: { type: "array", items: { type: "object", properties: { id: { type: "string" }, label: { type: "string" }, description: { type: "string" } }, required: ["id", "label"] } },
+          allowMultiple: { type: "boolean" },
+        },
+        required: ["question", "options"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "present_table",
+      description: "Present structured comparison data in a compact table. Do not repeat the table in Markdown.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          columns: { type: "array", items: { type: "object", properties: { key: { type: "string" }, label: { type: "string" } }, required: ["key", "label"] } },
+          rows: { type: "array", items: { type: "object" } },
+          caption: { type: "string" },
+        },
+        required: ["columns", "rows"],
+      },
+    },
+  },
 ] satisfies ChatCompletionTool[];
 
 export class EvaAgent extends DurableObject<Env> {
@@ -181,7 +234,8 @@ export class EvaAgent extends DurableObject<Env> {
     this.send(server, "server.hello", { protocolVersion: PROTOCOL_VERSION, agentMode: "hybrid" });
     this.send(server, "device.presence", { devices: this.connectedDevices() });
     const protocols = request.headers.get("sec-websocket-protocol")?.split(",").map((value) => value.trim()) ?? [];
-    const headers = protocols.includes("eva-v2") ? { "sec-websocket-protocol": "eva-v2" } : undefined;
+    const protocol = protocols.includes("eva-v3") ? "eva-v3" : protocols.includes("eva-v2") ? "eva-v2" : undefined;
+    const headers = protocol ? { "sec-websocket-protocol": protocol } : undefined;
     return new Response(null, { status: 101, webSocket: client, headers });
   }
 
@@ -356,6 +410,13 @@ export class EvaAgent extends DurableObject<Env> {
       case "tool.reject":
         await this.rejectTool(userId, command.toolCallId);
         return;
+      case "ui.choice.submit":
+        this.runs.start(command.chatId, await this.activeDeviceChatIds());
+        this.ctx.waitUntil(this.submitChoice(userId, command.chatId, command.messageId, command.blockId, command.selected).catch((error) => {
+          this.runs.finish(command.chatId);
+          this.broadcast("server.error", { code: "UI_ACTION_FAILED", message: errorMessage(error) });
+        }));
+        return;
       case "message.send":
         this.runs.start(command.chatId, await this.activeDeviceChatIds());
         this.ctx.waitUntil(this.routePrompt(userId, command.chatId, command.content, command.routing ?? "auto").catch((error) => {
@@ -378,7 +439,7 @@ export class EvaAgent extends DurableObject<Env> {
         await this.acceptDeviceTool(socket, command.turnId, command.toolCall);
         return;
       case "device.turn.complete":
-        await this.acceptDeviceCompletion(socket, command.turnId, command.content, command.status);
+        await this.acceptDeviceCompletion(socket, command.turnId, command.content, command.status, command.uiBlocks);
         return;
       case "sync.turn.push":
         await importTurn(this.env.DB, userId, command);
@@ -411,6 +472,20 @@ export class EvaAgent extends DurableObject<Env> {
     }
     if ((routing === "device" || routing === "private") && !device) throw new Error("Your Eva desktop device is offline.");
     await this.runPrompt(userId, chatId, content);
+  }
+
+  private async submitChoice(userId: string, chatId: string, messageId: string, blockId: string, selected: string[]): Promise<void> {
+    const chat = await getChat(this.env.DB, userId, chatId);
+    const message = chat.messages.find((candidate) => candidate.id === messageId);
+    const block = message?.uiBlocks.find((candidate) => candidate.id === blockId && candidate.kind === "choice");
+    if (!message || !block || block.kind !== "choice" || block.status === "submitted") throw new Error("That choice is no longer available.");
+    const allowed = new Set(block.options.map((option) => option.id));
+    if (selected.some((id) => !allowed.has(id)) || (!block.allowMultiple && selected.length !== 1)) throw new Error("The selected option was not valid.");
+    const updatedMessage = { ...message, uiBlocks: message.uiBlocks.map((candidate) => candidate.id === blockId ? { ...block, selected, status: "submitted" as const } : candidate) };
+    await updateMessage(this.env.DB, userId, chatId, messageId, { uiBlocks: updatedMessage.uiBlocks });
+    this.broadcast("message.updated", { chatId, message: updatedMessage });
+    const labels = block.options.filter((option) => selected.includes(option.id)).map((option) => option.label);
+    await this.runPrompt(userId, chatId, `I selected: ${labels.join(", ")}. Continue based on this choice.`);
   }
 
   private async runDevicePrompt(
@@ -491,9 +566,10 @@ export class EvaAgent extends DurableObject<Env> {
     turnId: string,
     content: string,
     status: "complete" | "aborted" | "error",
+    uiBlocks: UiBlock[],
   ): Promise<void> {
     const pending = await this.authorizeDeviceTurn(socket, turnId);
-    await updateMessage(this.env.DB, pending.userId, pending.chatId, pending.assistantMessageId, { content, status });
+    await updateMessage(this.env.DB, pending.userId, pending.chatId, pending.assistantMessageId, { content, status, uiBlocks });
     await this.ctx.storage.delete([`device-turn:${turnId}`, `active-device-turn:${pending.chatId}`]);
     this.runs.finish(pending.chatId);
     await this.scheduleDeviceAlarm();
@@ -503,6 +579,7 @@ export class EvaAgent extends DurableObject<Env> {
       messageId: pending.assistantMessageId,
       content,
       status,
+      uiBlocks,
     });
     this.broadcast("run.status", { chatId: pending.chatId, status: status === "complete" ? "idle" : status });
     this.broadcast("route.status", {
@@ -545,6 +622,7 @@ export class EvaAgent extends DurableObject<Env> {
       messageId: pending.assistantMessageId,
       content: message,
       status: "error",
+      uiBlocks: [],
     });
     this.broadcast("run.status", { chatId: pending.chatId, status: "error" });
     this.broadcast("route.status", {
@@ -743,6 +821,15 @@ export class EvaAgent extends DurableObject<Env> {
         this.broadcast("tool.call", { chatId, toolCall });
 
         if (needsApproval) {
+          await this.appendUiBlock(userId, chatId, assistantMessageId, uiBlockSchema.parse({
+            id: crypto.randomUUID(),
+            kind: "approval",
+            toolCallId: toolCall.id,
+            title: "Run command?",
+            description: String(request.input.command ?? "This command will run in Eva's isolated cloud workspace."),
+            risk: "medium",
+            createdAt: new Date().toISOString(),
+          }));
           await saveApproval(this.env.DB, userId, chatId, assistantMessageId, toolCall.id, messages);
           await updateMessage(this.env.DB, userId, chatId, assistantMessageId, { content, status: "complete" });
           await audit(this.env.DB, userId, "tool.approval.requested", toolCall.id, { tool: "bash" });
@@ -767,7 +854,11 @@ export class EvaAgent extends DurableObject<Env> {
   ): Promise<string> {
     try {
       let output: string;
-      if (request.name === "web_fetch") {
+      if (request.name === "present_plan" || request.name === "present_choice" || request.name === "present_table") {
+        const block = generativeUiBlock(request.name, request.input);
+        await this.appendUiBlock(userId, chatId, assistantMessageId, block);
+        output = `Presented ${block.kind} in Eva.`;
+      } else if (request.name === "web_fetch") {
         output = await runWebFetch(webFetchInputSchema.parse(request.input).url);
       } else if (request.name === "remember") {
         const input = rememberInputSchema.parse(request.input);
@@ -795,6 +886,11 @@ export class EvaAgent extends DurableObject<Env> {
         });
         await this.env.REMINDER_SCHEDULER.getByName(userId).refresh(userId);
         this.broadcast("reminder.updated", { reminder });
+        await this.appendUiBlock(userId, chatId, assistantMessageId, uiBlockSchema.parse({
+          id: crypto.randomUUID(), kind: "reminder", reminderId: reminder.id, title: reminder.title, notes: reminder.notes,
+          runAt: reminder.nextRunAt ?? reminder.runAt, timezone: reminder.timezone, recurrence: reminder.recurrence,
+          appEnabled: reminder.appEnabled, emailEnabled: reminder.emailEnabled, status: reminder.status, createdAt: new Date().toISOString(),
+        }));
         const emailNote = input.email && (!preferences.emailEnabled || !preferences.email)
           ? " Email delivery is requested but must be enabled with an address in Settings."
           : "";
@@ -824,6 +920,15 @@ export class EvaAgent extends DurableObject<Env> {
       this.broadcast("tool.update", { chatId, toolCall: updated });
       return `Tool failed: ${output}`;
     }
+  }
+
+  private async appendUiBlock(userId: string, chatId: string, assistantMessageId: string, block: UiBlock): Promise<void> {
+    const chat = await getChat(this.env.DB, userId, chatId);
+    const message = chat.messages.find((candidate) => candidate.id === assistantMessageId);
+    if (!message) throw new Error("The assistant message for this UI block was not found.");
+    const updated = { ...message, uiBlocks: [...message.uiBlocks.filter((candidate) => candidate.id !== block.id), block] };
+    await updateMessage(this.env.DB, userId, chatId, assistantMessageId, { uiBlocks: updated.uiBlocks });
+    this.broadcast("message.updated", { chatId, message: updated });
   }
 
   private async approveTool(userId: string, toolCallId: string): Promise<void> {
@@ -895,7 +1000,7 @@ function buildModelMessages(settings: AgentSettings, memories: Awaited<ReturnTyp
     ? `\n\nRelevant long-term memories:\n${memories.map((memory) => `- [${memory.kind}] ${memory.content}`).join("\n")}`
     : "";
   return [
-    { role: "system", content: `${settings.systemInstructions}\n\nCurrent UTC time: ${new Date().toISOString()}. The user's configured timezone is ${timezone}. Use it for relative or unspecified reminder times; only override it when the user names another timezone.\n\n${MEMORY_SAFETY_INSTRUCTION}${memoryContext}` },
+    { role: "system", content: `${settings.systemInstructions}\n\nCurrent UTC time: ${new Date().toISOString()}. The user's configured timezone is ${timezone}. Use it for relative or unspecified reminder times; only override it when the user names another timezone.\n\nUse present_plan for trackable multi-step work, present_choice when the next step needs a user decision, and present_table for structured comparisons. Do not duplicate a generated card as a Markdown list or table.\n\n${MEMORY_SAFETY_INSTRUCTION}${memoryContext}` },
     ...history.slice(-40).map((message) => ({ role: message.role, content: message.content } as ModelMessage)),
   ];
 }
@@ -956,6 +1061,14 @@ function parseToolInput(value: string): Record<string, unknown> {
 
 function normalizeLegacyInput(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function generativeUiBlock(name: string, raw: Record<string, unknown>): UiBlock {
+  const common = { id: crypto.randomUUID(), createdAt: new Date().toISOString() };
+  if (name === "present_plan") return uiBlockSchema.parse({ ...common, kind: "plan", ...presentPlanInputSchema.parse(raw) });
+  if (name === "present_choice") return uiBlockSchema.parse({ ...common, kind: "choice", selected: [], status: "awaiting", ...presentChoiceInputSchema.parse(raw) });
+  if (name === "present_table") return uiBlockSchema.parse({ ...common, kind: "table", ...presentTableInputSchema.parse(raw) });
+  throw new Error(`Unknown generative UI tool ${name}.`);
 }
 
 function safeJson(raw: string): unknown {

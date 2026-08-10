@@ -5,11 +5,13 @@ import {
   PROTOCOL_VERSION,
   MAX_CONCURRENT_CHATS,
   clientCommandSchema,
+  uiBlockSchema,
   type ChatMessage,
   type ClientCommand,
   type ServerEvent,
   type ServerEventType,
   type ToolCall,
+  type UiBlock,
 } from "../../../packages/protocol/src/index.js";
 import type { AgentBackend } from "./agent-backend.js";
 import { ChatRepository } from "./chat-repository.js";
@@ -137,6 +139,12 @@ export class AgentServer {
           .catch((error) => this.send(socket, "server.error", { code: "AGENT_ERROR", message: error instanceof Error ? error.message : "Agent failed" }))
           .finally(() => this.reservedChats.delete(command.chatId));
         return;
+      case "ui.choice.submit":
+        this.reserveChat(command.chatId);
+        void this.submitChoice(command.chatId, command.messageId, command.blockId, command.selected)
+          .catch((error) => this.send(socket, "server.error", { code: "UI_ACTION_FAILED", message: error instanceof Error ? error.message : "The choice could not be submitted." }))
+          .finally(() => this.reservedChats.delete(command.chatId));
+        return;
       case "device.turn.execute":
         this.reserveChat(command.chat.id);
         void this.runDeviceTurn(socket, command.turnId, command.chat, command.content)
@@ -153,6 +161,21 @@ export class AgentServer {
     this.reservedChats.add(chatId);
   }
 
+  private async submitChoice(chatId: string, messageId: string, blockId: string, selected: string[]): Promise<void> {
+    const chat = await this.options.repository.get(chatId);
+    const message = chat.messages.find((candidate) => candidate.id === messageId);
+    const block = message?.uiBlocks.find((candidate) => candidate.id === blockId && candidate.kind === "choice");
+    if (!message || !block || block.kind !== "choice" || block.status === "submitted") throw new Error("That choice is no longer available.");
+    const allowed = new Set(block.options.map((option) => option.id));
+    if (selected.some((id) => !allowed.has(id)) || (!block.allowMultiple && selected.length !== 1)) throw new Error("The selected option was not valid.");
+    const updatedChat = await this.options.repository.updateMessage(chatId, messageId, {
+      uiBlocks: message.uiBlocks.map((candidate) => candidate.id === blockId ? { ...block, selected, status: "submitted" as const } : candidate),
+    });
+    this.broadcast("message.updated", { chatId, message: updatedChat.messages.find((candidate) => candidate.id === messageId)! });
+    const labels = block.options.filter((option) => selected.includes(option.id)).map((option) => option.label);
+    await this.runPrompt(chatId, `I selected: ${labels.join(", ")}. Continue based on this choice.`);
+  }
+
   private async runDeviceTurn(socket: WebSocket, turnId: string, chat: Parameters<AgentBackend["generate"]>[0], prompt: string): Promise<void> {
     const assistant = [...chat.messages].reverse().find((message) => message.role === "assistant" && message.status === "streaming");
     if (!assistant) throw new Error("The hybrid turn is missing its assistant message.");
@@ -161,6 +184,7 @@ export class AgentServer {
     let content = "";
     let toolQueue = Promise.resolve();
     const toolCalls = new Map<string, ToolCall>();
+    const uiBlocks: UiBlock[] = [];
     try {
       const result = await this.options.backend.generate(chat, prompt, (delta) => {
         content += delta;
@@ -168,6 +192,11 @@ export class AgentServer {
       }, (activity) => {
         toolQueue = toolQueue.then(async () => {
           if (activity.phase === "start") {
+            const uiBlock = uiBlockFromTool(activity.name, activity.input);
+            if (uiBlock) {
+              uiBlocks.push(uiBlock);
+              return;
+            }
             const toolCall: ToolCall = {
               id: activity.id,
               assistantMessageId: assistant.id,
@@ -201,7 +230,7 @@ export class AgentServer {
         this.send(socket, "device.turn.tool", { turnId, chatId: chat.id, toolCall: completed });
       }
       if (result.sessionFile) chat.sessionFile = result.sessionFile;
-      this.send(socket, "device.turn.complete", { turnId, chatId: chat.id, messageId: assistant.id, content, status: "complete" });
+      this.send(socket, "device.turn.complete", { turnId, chatId: chat.id, messageId: assistant.id, content, status: "complete", uiBlocks });
     } catch (error) {
       const aborted = error instanceof Error && (error.message === "ABORTED" || /abort/i.test(error.message));
       this.send(socket, "device.turn.complete", {
@@ -210,6 +239,7 @@ export class AgentServer {
         messageId: assistant.id,
         content: content || (aborted ? "Stopped." : error instanceof Error ? error.message : "The local turn failed."),
         status: aborted ? "aborted" : "error",
+        uiBlocks,
       });
     } finally {
       this.deviceTurns.delete(turnId);
@@ -242,6 +272,14 @@ export class AgentServer {
           const state = this.running.get(chatId);
           if (!state) return;
           if (activity.phase === "start") {
+            const uiBlock = uiBlockFromTool(activity.name, activity.input);
+            if (uiBlock) {
+              const currentChat = await this.options.repository.get(chatId);
+              const assistant = currentChat.messages.find((message) => message.id === state.assistantId)!;
+              const updatedChat = await this.options.repository.updateMessage(chatId, state.assistantId, { uiBlocks: [...assistant.uiBlocks, uiBlock] });
+              this.broadcast("message.updated", { chatId, message: updatedChat.messages.find((message) => message.id === state.assistantId)! });
+              return;
+            }
             const toolCall: ToolCall = {
               id: activity.id,
               assistantMessageId: state.assistantId,
@@ -328,5 +366,17 @@ function safeJson(raw: string): unknown {
 }
 
 function makeMessage(role: ChatMessage["role"], content: string, status: ChatMessage["status"]): ChatMessage {
-  return { id: randomUUID(), role, content, status, createdAt: new Date().toISOString() };
+  return { id: randomUUID(), role, content, status, createdAt: new Date().toISOString(), uiBlocks: [] };
+}
+
+function uiBlockFromTool(name: string, input: Record<string, unknown>): UiBlock | undefined {
+  const common = { id: randomUUID(), createdAt: new Date().toISOString() };
+  const candidate = name === "present_plan" ? { ...common, kind: "plan", ...input }
+    : name === "present_choice" ? { ...common, kind: "choice", selected: [], status: "awaiting", ...input }
+      : name === "present_table" ? { ...common, kind: "table", ...input }
+        : undefined;
+  if (!candidate) return undefined;
+  const parsed = uiBlockSchema.safeParse(candidate);
+  if (!parsed.success) throw new Error(`Invalid ${name} payload: ${parsed.error.issues[0]?.message ?? "invalid UI block"}`);
+  return parsed.data;
 }

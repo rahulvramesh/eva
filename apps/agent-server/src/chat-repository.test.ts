@@ -24,6 +24,7 @@ describe("ChatRepository", () => {
       content: "Help me make a lightweight personal assistant with a very long title",
       createdAt: new Date().toISOString(),
       status: "complete",
+      uiBlocks: [],
     });
 
     const restored = await repository.get(chat.id);

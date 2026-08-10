@@ -4,7 +4,7 @@ import { appendAssistantDelta, appendMessage, mergeChatSnapshot } from "./chat-s
 
 const now = "2026-08-10T00:00:00.000Z";
 const emptyChat = (id: string): Chat => ({ id, title: id, createdAt: now, updatedAt: now, messages: [], toolCalls: [] });
-const message = (id: string, role: ChatMessage["role"], content: string): ChatMessage => ({ id, role, content, status: "streaming", createdAt: now });
+const message = (id: string, role: ChatMessage["role"], content: string): ChatMessage => ({ id, role, content, status: "streaming", createdAt: now, uiBlocks: [] });
 
 describe("concurrent renderer chat state", () => {
   it("keeps deltas isolated by chat", () => {

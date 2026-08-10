@@ -8,6 +8,7 @@ import type {
   ThinkingLevel,
   ToolCall,
 } from "../../../packages/protocol/src/index";
+import { uiBlockSchema } from "../../../packages/protocol/src/index";
 
 type ChatRow = { id: string; title: string; created_at: string; updated_at: string };
 type MessageRow = {
@@ -20,6 +21,7 @@ type MessageRow = {
   device_id: string | null;
   model: string | null;
   private: number;
+  ui_blocks_json: string;
 };
 type ToolRow = {
   id: string;
@@ -101,7 +103,7 @@ export async function getChat(db: D1Database, userId: string, chatId: string): P
   if (!row) throw new Error("Chat not found.");
   const [messages, tools] = await Promise.all([
     db.prepare(`
-      SELECT id, role, content, status, created_at, execution_host, device_id, model, private FROM messages
+      SELECT id, role, content, status, created_at, execution_host, device_id, model, private, ui_blocks_json FROM messages
       WHERE chat_id = ?1 AND user_id = ?2 ORDER BY created_at
     `).bind(chatId, userId).all<MessageRow>(),
     db.prepare(`
@@ -132,14 +134,15 @@ export async function appendMessage(
     content,
     status,
     createdAt: new Date().toISOString(),
+    uiBlocks: [],
     ...provenance,
   };
   const title = role === "user" ? titleFromPrompt(content) : null;
   await db.batch([
     db.prepare(`
-      INSERT INTO messages (id, chat_id, user_id, role, content, status, created_at, execution_host, device_id, model, private)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-    `).bind(message.id, chatId, userId, role, content, status, message.createdAt, message.executionHost ?? null, message.deviceId ?? null, message.model ?? null, message.private ? 1 : 0),
+      INSERT INTO messages (id, chat_id, user_id, role, content, status, created_at, execution_host, device_id, model, private, ui_blocks_json)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+    `).bind(message.id, chatId, userId, role, content, status, message.createdAt, message.executionHost ?? null, message.deviceId ?? null, message.model ?? null, message.private ? 1 : 0, JSON.stringify(message.uiBlocks)),
     db.prepare(`
       UPDATE chats SET updated_at = ?1,
         title = CASE WHEN title = 'New chat' AND ?2 IS NOT NULL THEN ?2 ELSE title END
@@ -159,10 +162,10 @@ export async function appendMessageWithId(
   const title = message.role === "user" ? titleFromPrompt(message.content) : null;
   await db.batch([
     db.prepare(`
-      INSERT INTO messages (id, chat_id, user_id, role, content, status, created_at, execution_host, device_id, model, private)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+      INSERT INTO messages (id, chat_id, user_id, role, content, status, created_at, execution_host, device_id, model, private, ui_blocks_json)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
       ON CONFLICT(id) DO NOTHING
-    `).bind(message.id, chatId, userId, message.role, message.content, message.status, message.createdAt, message.executionHost ?? null, message.deviceId ?? null, message.model ?? null, message.private ? 1 : 0),
+    `).bind(message.id, chatId, userId, message.role, message.content, message.status, message.createdAt, message.executionHost ?? null, message.deviceId ?? null, message.model ?? null, message.private ? 1 : 0, JSON.stringify(message.uiBlocks)),
     db.prepare(`
       UPDATE chats SET updated_at = MAX(updated_at, ?1),
         title = CASE WHEN title = 'New chat' AND ?2 IS NOT NULL THEN ?2 ELSE title END
@@ -193,12 +196,12 @@ export async function updateMessage(
   userId: string,
   chatId: string,
   messageId: string,
-  patch: Pick<ChatMessage, "content" | "status">,
+  patch: Partial<Pick<ChatMessage, "content" | "status" | "uiBlocks">>,
 ): Promise<void> {
   const result = await db.prepare(`
-    UPDATE messages SET content = ?1, status = ?2
-    WHERE id = ?3 AND chat_id = ?4 AND user_id = ?5
-  `).bind(patch.content, patch.status, messageId, chatId, userId).run();
+    UPDATE messages SET content = COALESCE(?1, content), status = COALESCE(?2, status), ui_blocks_json = COALESCE(?3, ui_blocks_json)
+    WHERE id = ?4 AND chat_id = ?5 AND user_id = ?6
+  `).bind(patch.content ?? null, patch.status ?? null, patch.uiBlocks ? JSON.stringify(patch.uiBlocks) : null, messageId, chatId, userId).run();
   if (!result.meta.changes) throw new Error("Message not found.");
 }
 
@@ -482,6 +485,7 @@ function toMessage(row: MessageRow): ChatMessage {
     deviceId: row.device_id ?? undefined,
     model: row.model ?? undefined,
     private: Boolean(row.private),
+    uiBlocks: parseUiBlocks(row.ui_blocks_json),
   };
 }
 
@@ -524,6 +528,19 @@ function safeRecord(value: string): Record<string, unknown> {
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
   } catch {
     return {};
+  }
+}
+
+function parseUiBlocks(value: string): ChatMessage["uiBlocks"] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((candidate) => {
+      const result = uiBlockSchema.safeParse(candidate);
+      return result.success ? [result.data] : [];
+    });
+  } catch {
+    return [];
   }
 }
 

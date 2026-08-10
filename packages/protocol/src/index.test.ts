@@ -42,6 +42,20 @@ describe("protocol", () => {
     expect(chat.toolCalls).toEqual([]);
   });
 
+  it("validates persisted UI blocks and choice actions", () => {
+    const chat = chatSchema.parse({
+      id: "chat-1", title: "Decision", createdAt: "2026-08-10T00:00:00.000Z", updatedAt: "2026-08-10T00:00:00.000Z",
+      messages: [{
+        id: "message-1", role: "assistant", content: "Choose one", status: "complete", createdAt: "2026-08-10T00:00:00.000Z",
+        uiBlocks: [{ id: "11111111-1111-4111-8111-111111111111", kind: "choice", createdAt: "2026-08-10T00:00:00.000Z", question: "Where?", options: [{ id: "local", label: "Local" }, { id: "cloud", label: "Cloud" }] }],
+      }],
+    });
+    expect(chat.messages[0]?.uiBlocks[0]).toMatchObject({ kind: "choice", status: "awaiting", selected: [] });
+    expect(clientCommandSchema.safeParse(command("ui.choice.submit", {
+      chatId: chat.id, messageId: "message-1", blockId: "11111111-1111-4111-8111-111111111111", selected: ["local"],
+    })).success).toBe(true);
+  });
+
   it("validates hybrid device registration and execution commands", () => {
     const device = {
       id: "device-1",
@@ -75,6 +89,7 @@ describe("protocol", () => {
           content: "",
           status: "streaming",
           createdAt: "2026-08-10T00:00:00.000Z",
+          uiBlocks: [],
         }],
         toolCalls: [],
       },

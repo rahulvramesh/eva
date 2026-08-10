@@ -792,3 +792,53 @@ button { color: inherit; }
   .settings-section-heading > small { display: block; max-width: none; margin-top: 4px; text-align: left; }
   .settings-window-section .reminder-create { display: flex; }
 }
+
+/* Controlled generative UI */
+.genui-stack { display: grid; gap: 10px; margin-top: 12px; }
+.genui-card { overflow: hidden; border: 1px solid color-mix(in srgb, currentColor 16%, transparent); border-radius: 16px; background: color-mix(in srgb, var(--raised-surface) 88%, transparent); box-shadow: inset 0 1px rgba(255,255,255,.035); }
+.genui-card > header { display: flex; align-items: center; gap: 10px; padding: 13px 14px; border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent); }
+.genui-card > header > svg { width: 20px; height: 20px; color: #78b8a0; }
+.genui-card header div, .genui-card header:not(:has(div)) { display: grid; gap: 2px; }
+.genui-card header small { color: color-mix(in srgb, currentColor 58%, transparent); font-size: 9px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.genui-card header strong { font-size: 13px; line-height: 1.35; }
+.genui-plan ol { display: grid; gap: 0; margin: 0; padding: 7px 13px 10px; list-style: none; }
+.genui-plan li { display: grid; grid-template-columns: 18px 1fr auto; align-items: center; gap: 8px; min-height: 34px; color: color-mix(in srgb, currentColor 82%, transparent); font-size: 12px; }
+.genui-plan li svg { width: 15px; color: #737a76; }
+.genui-plan li.running svg { color: #d8a858; animation: genui-pulse 1.3s ease-in-out infinite; }
+.genui-plan li.complete svg { color: #65ad8b; }
+.genui-plan li.error svg { color: #db726e; }
+.genui-plan li small { color: color-mix(in srgb, currentColor 45%, transparent); font-size: 9px; text-transform: capitalize; }
+@keyframes genui-pulse { 50% { opacity: .45; } }
+.genui-choice { padding-bottom: 11px; }
+.genui-choice > header { align-items: start; }
+.genui-options { display: grid; gap: 6px; padding: 10px; }
+.genui-options > button { display: grid; grid-template-columns: 20px 1fr; align-items: start; gap: 9px; width: 100%; border: 1px solid color-mix(in srgb, currentColor 12%, transparent); border-radius: 11px; padding: 10px; background: transparent; text-align: left; cursor: pointer; }
+.genui-options > button:hover:not(:disabled), .genui-options > button.selected { border-color: #609e87; background: color-mix(in srgb, #397b63 15%, transparent); }
+.genui-options button > span:last-child { display: grid; gap: 3px; }
+.genui-options strong { font-size: 11px; }
+.genui-options small { color: color-mix(in srgb, currentColor 60%, transparent); font-size: 10px; line-height: 1.4; }
+.choice-check { display: grid; place-items: center; width: 17px; height: 17px; border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: 99px; }
+.choice-check svg { width: 11px; }
+.genui-primary { border-color: transparent !important; background: #e9ece8 !important; color: #171917 !important; font-weight: 720; }
+.genui-choice > .genui-primary { margin: 0 10px; padding: 8px 13px; border: 0; border-radius: 9px; font-size: 10px; cursor: pointer; }
+.genui-primary:disabled { opacity: .4; cursor: default; }
+.genui-complete { display: flex; align-items: center; gap: 6px; padding: 9px 13px 12px; color: #69a98f; font-size: 10px; }
+.genui-complete svg { width: 14px; }
+.genui-table-scroll { overflow-x: auto; }
+.genui-table table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.genui-table th, .genui-table td { border-bottom: 1px solid color-mix(in srgb, currentColor 9%, transparent); padding: 9px 11px; text-align: left; white-space: nowrap; }
+.genui-table th { color: color-mix(in srgb, currentColor 58%, transparent); font-size: 9px; text-transform: uppercase; }
+.genui-table p { margin: 0; padding: 9px 11px; color: color-mix(in srgb, currentColor 55%, transparent); font-size: 9px; }
+.genui-reminder .genui-badge { margin-left: auto; border-radius: 99px; padding: 4px 7px; background: color-mix(in srgb, #67a78e 18%, transparent); color: #75b99e; font-size: 8px; text-transform: capitalize; }
+.genui-reminder .genui-badge.paused { background: color-mix(in srgb, #c39a56 18%, transparent); color: #d1a75e; }
+.reminder-time { display: flex; gap: 9px; padding: 12px 14px 4px; font-size: 11px; }
+.reminder-time > svg { width: 16px; color: #7e8781; }
+.reminder-time span { display: grid; gap: 3px; }
+.reminder-time small { color: color-mix(in srgb, currentColor 55%, transparent); font-size: 9px; }
+.genui-reminder > p { margin: 7px 14px; color: color-mix(in srgb, currentColor 72%, transparent); font-size: 10px; }
+.genui-card > footer { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 10px 12px; }
+.genui-card > footer > span { margin-right: auto; color: color-mix(in srgb, currentColor 50%, transparent); font-size: 9px; }
+.genui-card footer button { display: flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, currentColor 14%, transparent); border-radius: 8px; padding: 7px 9px; background: transparent; font-size: 9px; cursor: pointer; }
+.genui-card footer button svg { width: 12px; }
+.genui-card footer button.danger { color: #ce7773; }
+.genui-approval > code { display: block; overflow-x: auto; margin: 11px; border-radius: 9px; padding: 10px; background: color-mix(in srgb, #000 24%, transparent); color: color-mix(in srgb, currentColor 82%, transparent); font-size: 10px; white-space: pre-wrap; }

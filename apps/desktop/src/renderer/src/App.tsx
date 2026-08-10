@@ -57,8 +57,10 @@ import {
   appendMessage,
   completeAssistantMessage,
   mergeChatSnapshot,
+  upsertMessage,
   upsertToolCall,
 } from "./chat-state";
+import { GenerativeUiBlock } from "./GenerativeUi";
 
 export function App() {
   const clientRef = useRef<EvaClient | undefined>(undefined);
@@ -201,6 +203,9 @@ export function App() {
       case "message.append":
         updateCachedChat(event.payload.chatId, (chat) => appendMessage(chat, event.payload.message));
         break;
+      case "message.updated":
+        updateCachedChat(event.payload.chatId, (chat) => upsertMessage(chat, event.payload.message));
+        break;
       case "assistant.delta":
         updateCachedChat(event.payload.chatId, (chat) => appendAssistantDelta(chat, event.payload.messageId, event.payload.delta));
         break;
@@ -230,6 +235,7 @@ export function App() {
           event.payload.messageId,
           event.payload.content,
           event.payload.status,
+          event.payload.uiBlocks,
         ));
         break;
       case "settings.snapshot":
@@ -477,6 +483,7 @@ export function App() {
               <div className="timeline-group" key={message.id}>
                 {message.role === "assistant" && showToolCalls && activeChat.toolCalls
                   .filter((toolCall) => toolCall.assistantMessageId === message.id)
+                  .filter((toolCall) => !message.uiBlocks.some((block) => block.kind === "approval" && block.toolCallId === toolCall.id))
                   .map((toolCall) => (
                     <ToolCallRow
                       key={toolCall.id}
@@ -485,7 +492,19 @@ export function App() {
                       onReject={() => clientRef.current?.send(command("tool.reject", { toolCallId: toolCall.id }))}
                     />
                   ))}
-                <Message message={message} />
+                <Message
+                  message={message}
+                  toolCalls={activeChat.toolCalls}
+                  reminders={reminders}
+                  onChoice={(blockId, selected) => clientRef.current?.send(command("ui.choice.submit", { chatId: activeChat.id, messageId: message.id, blockId, selected }))}
+                  onApprove={(toolCallId) => clientRef.current?.send(command("tool.approve", { toolCallId }))}
+                  onReject={(toolCallId) => clientRef.current?.send(command("tool.reject", { toolCallId }))}
+                  onReminderStatus={(block, status) => clientRef.current?.send(command("reminder.update", {
+                    reminderId: block.reminderId, title: block.title, notes: block.notes, runAt: block.runAt, timezone: block.timezone,
+                    recurrence: block.recurrence, appEnabled: block.appEnabled, emailEnabled: block.emailEnabled, status,
+                  }))}
+                  onReminderDelete={(reminderId) => clientRef.current?.send(command("reminder.delete", { reminderId }))}
+                />
               </div>
             ))}
           </div>
@@ -970,7 +989,16 @@ function EmptyState() {
   );
 }
 
-function Message({ message }: { message: ChatMessage }) {
+function Message({ message, toolCalls, reminders, onChoice, onApprove, onReject, onReminderStatus, onReminderDelete }: {
+  message: ChatMessage;
+  toolCalls: ToolCall[];
+  reminders: Reminder[];
+  onChoice: (blockId: string, selected: string[]) => void;
+  onApprove: (toolCallId: string) => void;
+  onReject: (toolCallId: string) => void;
+  onReminderStatus: (block: Extract<ChatMessage["uiBlocks"][number], { kind: "reminder" }>, status: "active" | "paused") => void;
+  onReminderDelete: (reminderId: string) => void;
+}) {
   return (
     <article className={`message ${message.role}`}>
       <div className="message-label">{message.role === "user" ? "You" : "Eva"}</div>
@@ -991,6 +1019,24 @@ function Message({ message }: { message: ChatMessage }) {
           : <p>{message.content}</p>}
         {message.status === "aborted" && <span className="message-status">Stopped</span>}
         {message.status === "error" && <span className="message-status error">Incomplete</span>}
+        {message.uiBlocks.length > 0 && <div className="genui-stack">{message.uiBlocks.map((sourceBlock) => {
+          const currentReminder = sourceBlock.kind === "reminder" ? reminders.find((reminder) => reminder.id === sourceBlock.reminderId) : undefined;
+          const block = sourceBlock.kind === "reminder" && currentReminder ? {
+            ...sourceBlock,
+            title: currentReminder.title, notes: currentReminder.notes, runAt: currentReminder.nextRunAt ?? currentReminder.runAt,
+            timezone: currentReminder.timezone, recurrence: currentReminder.recurrence, appEnabled: currentReminder.appEnabled,
+            emailEnabled: currentReminder.emailEnabled, status: currentReminder.status,
+          } : sourceBlock;
+          return <GenerativeUiBlock
+          key={sourceBlock.id}
+          block={block}
+          toolCalls={toolCalls}
+          onChoice={(selected) => onChoice(block.id, selected)}
+          onApprove={onApprove}
+          onReject={onReject}
+          onReminderStatus={(status) => block.kind === "reminder" && onReminderStatus(block, status)}
+          onReminderDelete={() => block.kind === "reminder" && onReminderDelete(block.reminderId)}
+        />;})}</div>}
       </div>
     </article>
   );
