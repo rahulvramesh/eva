@@ -71,7 +71,13 @@ function createWindow(): void {
   if (process.platform === "win32") mainWindow.setBackgroundMaterial("acrylic");
   mainWindow.setAlwaysOnTop(true, "floating");
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  mainWindow.on("close", saveWindowState);
+  mainWindow.on("close", (event) => {
+    saveWindowState();
+    if (!quitting) {
+      event.preventDefault();
+      mainWindow?.hide();
+    }
+  });
   mainWindow.on("show", updateTrayMenu);
   mainWindow.on("hide", updateTrayMenu);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -93,16 +99,17 @@ function createWindow(): void {
 }
 
 function createTray(): void {
+  const iconName = process.platform === "darwin" ? "trayTemplate.png" : "icon.png";
   const iconPath = app.isPackaged
-    ? join(process.resourcesPath, "trayTemplate.png")
-    : join(app.getAppPath(), "build/trayTemplate.png");
+    ? join(process.resourcesPath, iconName)
+    : join(app.getAppPath(), "build", iconName);
   const icon = nativeImage.createFromPath(iconPath);
   if (icon.isEmpty()) {
     console.warn(`Could not load Eva tray icon at ${iconPath}`);
     return;
   }
   icon.setTemplateImage(process.platform === "darwin");
-  tray = new Tray(icon);
+  tray = new Tray(process.platform === "darwin" ? icon : icon.resize({ width: 16, height: 16 }));
   tray.setToolTip("Eva");
   tray.on("click", toggleWindow);
   updateTrayMenu();

@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { AgentModel, AgentSettings, Chat, ThinkingLevel } from "../../../packages/protocol/src/index.js";
+import { createEvaTools } from "./agent-tools.js";
 
 type SettingsUpdate = {
   provider: string;
@@ -177,7 +178,8 @@ export class PiAgentBackend implements AgentBackend {
       model,
       thinkingLevel: settings.thinkingLevel,
       resourceLoader,
-      noTools: "all",
+      noTools: "builtin",
+      customTools: createEvaTools(this.workspace),
     });
     const session = result.session as PiSession;
     this.sessions.set(chat.id, session);
