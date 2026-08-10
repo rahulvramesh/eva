@@ -1,9 +1,11 @@
 import { authenticate } from "./auth";
 import { EvaAgent } from "./eva-agent";
+import { ReminderScheduler } from "./reminder-scheduler";
 import { consumeMemoryQueue, type MemoryQueueMessage } from "./memory";
 import { PROTOCOL_VERSION } from "../../../packages/protocol/src/index";
 
 export { EvaAgent };
+export { ReminderScheduler };
 export { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
 
 export default {

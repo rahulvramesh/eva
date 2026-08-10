@@ -11,6 +11,7 @@
     "SANDBOX_TRANSPORT": "rpc",
     "EVA_CLOUD_MODEL": "@cf/moonshotai/kimi-k2.6",
     "EVA_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",
+    "EVA_REMINDER_FROM": "reminders@notify.tarx.app",
     "EVA_DEFAULT_SYSTEM_INSTRUCTIONS": "You are Eva, Rahul's concise and capable personal assistant. Use relevant long-term memories when helpful. Use web_fetch for current public information. Use bash only when execution is necessary, and explain destructive or sensitive actions before requesting approval. Use remember only for durable user preferences, profile facts, project context, or explicit instructions. Never memorize credentials, tokens, passwords, private keys, or transient details. Never say memory was saved unless the remember tool succeeded. When the user explicitly asks to remember, save, or store durable information, call remember before replying."
   },
   "assets": {
@@ -42,14 +43,22 @@
       { "queue": "eva-memory-production", "max_batch_size": 10, "max_batch_timeout": 5 }
     ]
   },
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "allowed_sender_addresses": ["reminders@notify.tarx.app"]
+    }
+  ],
   "durable_objects": {
     "bindings": [
       { "name": "EVA_AGENT", "class_name": "EvaAgent" },
+      { "name": "REMINDER_SCHEDULER", "class_name": "ReminderScheduler" },
       { "name": "Sandbox", "class_name": "Sandbox" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["EvaAgent", "Sandbox"] }
+    { "tag": "v1", "new_sqlite_classes": ["EvaAgent", "Sandbox"] },
+    { "tag": "v2", "new_sqlite_classes": ["ReminderScheduler"] }
   ],
   "containers": [
     {

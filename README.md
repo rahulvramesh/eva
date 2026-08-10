@@ -17,6 +17,7 @@ Eva is a lightweight personal assistant built as a compact Electron window. One 
 - There is no local/cloud mode switch. **Execution → Auto** keeps ordinary answers in Cloudflare and routes file, repository, terminal, and installed-software tasks to an online Eva desktop. Cloud and This device are explicit overrides.
 - **Private** requires a verified on-device Pi model such as Ollama and never silently falls back to cloud inference. Chats still sync unless the computer is offline.
 - Offline chats run through Pi and enter an outbox. Responses sync after reconnect; local command output is redacted by default unless **Offline Tool Output Sync** is enabled.
+- Create one-time or recurring reminders from chat or **Assistant Settings → Reminders**. Cloudflare owns the schedule, so app and email reminders continue while Eva Desktop or the computer is offline.
 
 Eva uses the current `@earendil-works/pi-coding-agent` SDK and the Pi credentials already configured on the machine. If Pi is not configured, run `pi` in a terminal and use `/login` first.
 
@@ -36,6 +37,8 @@ Eva Cloud provides the canonical synced chat and automatically discovers connect
 - `web_fetch` accepts public HTTP(S) text/JSON/XML, revalidates redirects, blocks local/private targets, and bounds time and response size.
 - device execution uses an outbound-only authenticated WebSocket; no inbound port, router configuration, or Cloudflare Tunnel to the laptop is required;
 - protocol v2 streams device model capabilities, route provenance, tool events, cancellation, presence, and idempotent offline-turn imports.
+- a separate per-user Reminder Scheduler Durable Object wakes for one-time and recurring reminders; D1 persists schedules, runs, notification history, and delivery preferences;
+- native Electron notifications and Cloudflare Email Service deliver reminders through the app and `reminders@notify.tarx.app`.
 
 The hosted backend uses Cloudflare Workers AI. Connected desktop turns use the Pi coding-agent SDK, its configured models, and the device's Eva workspace. If no desktop is online, Auto falls back to cloud for ordinary requests and reports a clear error for an explicitly device-only task. Enter the deployed endpoint and private token once: Electron encrypts it with macOS Keychain-backed safe storage or Windows DPAPI; the browser keeps its token in that browser profile.
 
@@ -59,10 +62,16 @@ pnpm exec wrangler r2 bucket create eva-workspaces-production
 pnpm exec wrangler vectorize create eva-memory-production --preset @cf/baai/bge-base-en-v1.5
 pnpm exec wrangler queues create eva-memory-production
 
+# Onboard or verify the transactional sending domain used by EVA_REMINDER_FROM.
+pnpm exec wrangler email sending list
+# If needed: pnpm exec wrangler email sending enable notify.tarx.app
+
 pnpm exec wrangler secret put EVA_API_TOKEN
 pnpm cloud:migrate
 pnpm cloud:deploy
 ```
+
+The complete reproducible setup, migration, validation, rollback, and reminder email instructions are in [`docs/REDEPLOYMENT.md`](docs/REDEPLOYMENT.md). Reminder behavior and failure semantics are in [`docs/REMINDERS.md`](docs/REMINDERS.md).
 
 For Cloudflare Access, add both secrets and put an Access policy in front of the Worker. Token authentication remains useful for Electron and recovery:
 

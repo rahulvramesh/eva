@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowUp,
+  Bell,
   Brain,
   CalendarBlank,
   CaretDown,
@@ -14,6 +15,7 @@ import {
   GlobeHemisphereWest,
   Info,
   Moon,
+  Envelope,
   Plus,
   SidebarSimple,
   Sparkle,
@@ -34,6 +36,10 @@ import {
   type DeviceCapability,
   type Memory,
   type MemoryKind,
+  type EvaNotification,
+  type NotificationPreferences,
+  type Reminder,
+  type ReminderRecurrence,
   type RoutingPolicy,
   type ThinkingLevel,
   type ServerEvent,
@@ -66,6 +72,14 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<AgentSettings>();
   const [memories, setMemories] = useState<Memory[]>([]);
+  const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [notifications, setNotifications] = useState<EvaNotification[]>([]);
+  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>({
+    email: "",
+    appEnabled: true,
+    emailEnabled: false,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Jakarta",
+  });
   const [authenticationRequired, setAuthenticationRequired] = useState(() => window.eva ? false : !hasCloudConfiguration());
   const [devices, setDevices] = useState<DeviceCapability[]>([]);
   const [routing, setRouting] = useState<RoutingPolicy>(() => {
@@ -213,6 +227,30 @@ export function App() {
       case "memory.deleted":
         setMemories((current) => current.filter((memory) => memory.id !== event.payload.memoryId));
         break;
+      case "reminder.snapshot":
+        setReminders(event.payload.reminders);
+        break;
+      case "reminder.updated":
+        setReminders((current) => [event.payload.reminder, ...current.filter((reminder) => reminder.id !== event.payload.reminder.id)]);
+        break;
+      case "reminder.deleted":
+        setReminders((current) => current.filter((reminder) => reminder.id !== event.payload.reminderId));
+        break;
+      case "notification.snapshot":
+        setNotifications(event.payload.notifications);
+        break;
+      case "notification.created":
+        setNotifications((current) => [event.payload.notification, ...current.filter((notification) => notification.id !== event.payload.notification.id)]);
+        showNativeNotification(event.payload.notification);
+        break;
+      case "notification.read":
+        setNotifications((current) => current.map((notification) => notification.id === event.payload.notificationId
+          ? { ...notification, readAt: event.payload.readAt }
+          : notification));
+        break;
+      case "notification.preferences":
+        setNotificationPreferences(event.payload.preferences);
+        break;
       case "server.error":
         setError(event.payload.message);
         break;
@@ -282,6 +320,10 @@ export function App() {
           {activeChat?.title === "New chat" ? "New Chat" : activeChat?.title ?? "New Chat"}
         </button>
         <div className="header-actions">
+          <button className="header-icon notification-trigger" onClick={() => setSettingsOpen(true)} aria-label="Open reminders and notifications">
+            <Bell weight={notifications.some((notification) => !notification.readAt) ? "fill" : "regular"} />
+            {notifications.some((notification) => !notification.readAt) && <span className="notification-dot" />}
+          </button>
           <button className="header-icon" onClick={createChat} aria-label="New chat"><Plus weight="bold" /></button>
           <button className="header-icon caret" onClick={() => setSidebarOpen((value) => !value)} aria-label="Show chats"><CaretDown weight="bold" /></button>
         </div>
@@ -337,6 +379,9 @@ export function App() {
                 syncOfflineToolOutput={syncOfflineToolOutput}
                 onSyncOfflineToolOutputChange={setSyncOfflineToolOutput}
                 memories={memories}
+                reminders={reminders}
+                notifications={notifications}
+                notificationPreferences={notificationPreferences}
                 devices={devices}
                 routing={routing}
                 onRoutingChange={setRouting}
@@ -349,6 +394,24 @@ export function App() {
                   status: memory.status,
                 }))}
                 onMemoryDelete={(memoryId) => clientRef.current?.send(command("memory.delete", { memoryId }))}
+                onReminderCreate={(input) => clientRef.current?.send(command("reminder.create", input))}
+                onReminderUpdate={(reminder) => clientRef.current?.send(command("reminder.update", {
+                  reminderId: reminder.id,
+                  title: reminder.title,
+                  notes: reminder.notes,
+                  runAt: reminder.nextRunAt ?? reminder.runAt,
+                  timezone: reminder.timezone,
+                  recurrence: reminder.recurrence,
+                  appEnabled: reminder.appEnabled,
+                  emailEnabled: reminder.emailEnabled,
+                  status: reminder.status,
+                }))}
+                onReminderDelete={(reminderId) => clientRef.current?.send(command("reminder.delete", { reminderId }))}
+                onNotificationRead={(notificationId) => clientRef.current?.send(command("notification.read", { notificationId }))}
+                onNotificationPreferences={(preferences) => {
+                  if (preferences.appEnabled && !window.eva && "Notification" in window && Notification.permission === "default") void Notification.requestPermission();
+                  clientRef.current?.send(command("notification.preferences.update", preferences));
+                }}
                 onClose={() => setSettingsOpen(false)}
                 onApply={(next) => {
                   clientRef.current?.send(command("settings.update", {
@@ -446,12 +509,20 @@ function SettingsPopover({
   syncOfflineToolOutput,
   onSyncOfflineToolOutputChange,
   memories,
+  reminders,
+  notifications,
+  notificationPreferences,
   devices,
   routing,
   onRoutingChange,
   onMemoryCreate,
   onMemoryUpdate,
   onMemoryDelete,
+  onReminderCreate,
+  onReminderUpdate,
+  onReminderDelete,
+  onNotificationRead,
+  onNotificationPreferences,
   onClose,
   onApply,
 }: {
@@ -464,12 +535,22 @@ function SettingsPopover({
   syncOfflineToolOutput: boolean;
   onSyncOfflineToolOutputChange: (sync: boolean) => void;
   memories: Memory[];
+  reminders: Reminder[];
+  notifications: EvaNotification[];
+  notificationPreferences: NotificationPreferences;
   devices: DeviceCapability[];
   routing: RoutingPolicy;
   onRoutingChange: (routing: RoutingPolicy) => void;
   onMemoryCreate: (kind: MemoryKind, content: string) => void;
   onMemoryUpdate: (memory: Memory) => void;
   onMemoryDelete: (memoryId: string) => void;
+  onReminderCreate: (input: {
+    title: string; notes: string; runAt: string; timezone: string; recurrence: ReminderRecurrence; appEnabled: boolean; emailEnabled: boolean;
+  }) => void;
+  onReminderUpdate: (reminder: Reminder) => void;
+  onReminderDelete: (reminderId: string) => void;
+  onNotificationRead: (notificationId: string) => void;
+  onNotificationPreferences: (preferences: NotificationPreferences) => void;
   onClose: () => void;
   onApply: (settings: AgentSettings) => void;
 }) {
@@ -623,6 +704,17 @@ function SettingsPopover({
         </div>
       </div>
 
+      <ReminderSettings
+        reminders={reminders}
+        notifications={notifications}
+        preferences={notificationPreferences}
+        onCreate={onReminderCreate}
+        onUpdate={onReminderUpdate}
+        onDelete={onReminderDelete}
+        onRead={onNotificationRead}
+        onPreferences={onNotificationPreferences}
+      />
+
         <div className="memory-settings">
           <div className="memory-heading"><span>Online Memory</span><strong>{memories.filter((memory) => memory.status === "active").length}</strong></div>
           <div className="memory-create">
@@ -671,10 +763,115 @@ function SettingsPopover({
   );
 }
 
+function ReminderSettings({
+  reminders,
+  notifications,
+  preferences,
+  onCreate,
+  onUpdate,
+  onDelete,
+  onRead,
+  onPreferences,
+}: {
+  reminders: Reminder[];
+  notifications: EvaNotification[];
+  preferences: NotificationPreferences;
+  onCreate: (input: { title: string; notes: string; runAt: string; timezone: string; recurrence: ReminderRecurrence; appEnabled: boolean; emailEnabled: boolean }) => void;
+  onUpdate: (reminder: Reminder) => void;
+  onDelete: (reminderId: string) => void;
+  onRead: (notificationId: string) => void;
+  onPreferences: (preferences: NotificationPreferences) => void;
+}) {
+  const detectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Jakarta";
+  const [title, setTitle] = useState("");
+  const [notes, setNotes] = useState("");
+  const [runAt, setRunAt] = useState(() => localDateTimeValue(new Date(Date.now() + 60 * 60_000)));
+  const [recurrence, setRecurrence] = useState<ReminderRecurrence>("none");
+  const [email, setEmail] = useState(preferences.email);
+  const [appEnabled, setAppEnabled] = useState(preferences.appEnabled);
+  const [emailEnabled, setEmailEnabled] = useState(preferences.emailEnabled);
+  const [timezone, setTimezone] = useState(preferences.timezone);
+
+  useEffect(() => {
+    setEmail(preferences.email);
+    setAppEnabled(preferences.appEnabled);
+    setEmailEnabled(preferences.emailEnabled);
+    setTimezone(preferences.timezone);
+  }, [preferences]);
+
+  const active = reminders.filter((reminder) => reminder.status !== "completed");
+  return (
+    <section className="reminder-settings">
+      <div className="memory-heading"><span>Reminders</span><strong>{active.length}</strong></div>
+      <div className="reminder-create">
+        <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Reminder title" maxLength={200} />
+        <textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Optional details" rows={2} maxLength={4000} />
+        <div className="reminder-schedule-row">
+          <input type="datetime-local" value={runAt} onChange={(event) => setRunAt(event.target.value)} />
+          <select value={recurrence} onChange={(event) => setRecurrence(event.target.value as ReminderRecurrence)}>
+            <option value="none">Once</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+        </div>
+        <small>{timezone} · Dates are stored as UTC instants.</small>
+        <button
+          type="button"
+          className="reminder-add"
+          disabled={!title.trim() || !runAt}
+          onClick={() => {
+            const timestamp = new Date(runAt);
+            if (!Number.isFinite(timestamp.getTime())) return;
+            onCreate({ title: title.trim(), notes: notes.trim(), runAt: timestamp.toISOString(), timezone, recurrence, appEnabled, emailEnabled });
+            setTitle("");
+            setNotes("");
+            setRunAt(localDateTimeValue(new Date(Date.now() + 60 * 60_000)));
+          }}
+        ><CalendarBlank weight="bold" /> Schedule reminder</button>
+      </div>
+
+      <div className="reminder-preferences">
+        <label><span><Bell weight="bold" /> App notifications</span><input type="checkbox" checked={appEnabled} onChange={(event) => setAppEnabled(event.target.checked)} /></label>
+        <label><span><Envelope weight="bold" /> Email notifications</span><input type="checkbox" checked={emailEnabled} onChange={(event) => setEmailEnabled(event.target.checked)} /></label>
+        <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" />
+        <div className="timezone-preference">
+          <input value={timezone} onChange={(event) => setTimezone(event.target.value)} aria-label="Reminder timezone" placeholder="Asia/Jakarta" />
+          <button type="button" onClick={() => setTimezone(detectedTimezone)}>Use current</button>
+        </div>
+        <button type="button" disabled={(emailEnabled && !email.trim()) || !timezone.trim()} onClick={() => onPreferences({ email: email.trim(), appEnabled, emailEnabled, timezone: timezone.trim() })}>Save delivery settings</button>
+      </div>
+
+      <div className="reminder-list">
+        {active.length ? active.slice(0, 20).map((reminder) => (
+          <div className={`reminder-item ${reminder.status}`} key={reminder.id}>
+            <button type="button" className="reminder-main" onClick={() => onUpdate({ ...reminder, status: reminder.status === "active" ? "paused" : "active" })}>
+              <strong>{reminder.title}</strong>
+              <small>{reminder.status === "paused" ? "Paused" : formatReminderDate(reminder.nextRunAt ?? reminder.runAt, reminder.timezone)} · {reminder.recurrence === "none" ? "once" : reminder.recurrence}</small>
+            </button>
+            <button type="button" className="memory-delete" onClick={() => onDelete(reminder.id)} aria-label={`Delete reminder: ${reminder.title}`}><Trash weight="bold" /></button>
+          </div>
+        )) : <p className="memory-empty">No upcoming reminders.</p>}
+      </div>
+
+      {notifications.length > 0 && (
+        <div className="notification-list">
+          <div className="memory-heading"><span>Recent notifications</span><strong>{notifications.filter((notification) => !notification.readAt).length}</strong></div>
+          {notifications.slice(0, 10).map((notification) => (
+            <button key={notification.id} type="button" className={notification.readAt ? "notification-item read" : "notification-item"} onClick={() => { if (!notification.readAt) onRead(notification.id); }}>
+              <strong>{notification.title}</strong><span>{notification.body}</span><small>{relativeDate(notification.createdAt)}</small>
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ToolCallRow({ toolCall, onApprove, onReject }: { toolCall: ToolCall; onApprove: () => void; onReject: () => void }) {
   const preview = toolCallPreview(toolCall);
   const isWeb = toolCall.name === "web_fetch";
-  const Icon = isWeb ? GlobeHemisphereWest : TerminalWindow;
+  const Icon = isWeb ? GlobeHemisphereWest : toolCall.name === "schedule_reminder" ? CalendarBlank : TerminalWindow;
   const StatusIcon = toolCall.status === "error" || toolCall.status === "rejected" ? WarningCircle : toolCall.status === "complete" ? CheckCircle : Circle;
   return (
     <details className={`tool-call ${toolCall.status}`}>
@@ -723,7 +920,18 @@ function Message({ message }: { message: ChatMessage }) {
       <div className="message-label">{message.role === "user" ? "You" : "Eva"}</div>
       <div className="message-body">
         {message.role === "assistant"
-          ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content || (message.status === "streaming" ? "…" : "")}</ReactMarkdown>
+          ? <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                table: ({ children }) => (
+                  <div className="markdown-table-scroll">
+                    <table>{children}</table>
+                  </div>
+                ),
+              }}
+            >
+              {message.content || (message.status === "streaming" ? "…" : "")}
+            </ReactMarkdown>
           : <p>{message.content}</p>}
         {message.status === "aborted" && <span className="message-status">Stopped</span>}
         {message.status === "error" && <span className="message-status error">Incomplete</span>}
@@ -733,13 +941,17 @@ function Message({ message }: { message: ChatMessage }) {
 }
 
 function toolCallPreview(toolCall: ToolCall): string {
-  const value = toolCall.name === "bash" ? toolCall.input.command : toolCall.name === "web_fetch" ? toolCall.input.url : undefined;
+  const value = toolCall.name === "bash" ? toolCall.input.command
+    : toolCall.name === "web_fetch" ? toolCall.input.url
+      : toolCall.name === "schedule_reminder" ? `${String(toolCall.input.title ?? "Reminder")} · ${String(toolCall.input.run_at ?? "")}`
+        : undefined;
   return typeof value === "string" ? value : JSON.stringify(toolCall.input);
 }
 
 function toolCallLabel(toolCall: ToolCall): string {
   if (toolCall.name === "bash") return "Ran command";
   if (toolCall.name === "web_fetch") return "Fetched web page";
+  if (toolCall.name === "schedule_reminder") return "Scheduled reminder";
   return toolCall.name.replace(/[_-]+/g, " ");
 }
 
@@ -800,4 +1012,22 @@ function formatThinkingLevel(level: ThinkingLevel): string {
   if (level === "off") return "Off";
   if (level === "xhigh") return "Extra High";
   return level[0]!.toUpperCase() + level.slice(1);
+}
+
+function showNativeNotification(notification: EvaNotification): void {
+  if (window.eva) {
+    window.eva.notify(notification.title, notification.body);
+    return;
+  }
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  new Notification(notification.title, { body: notification.body, icon: evaLogo });
+}
+
+function localDateTimeValue(date: Date): string {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
+function formatReminderDate(value: string, timezone: string): string {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: timezone }).format(new Date(value));
 }

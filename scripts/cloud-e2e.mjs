@@ -190,6 +190,37 @@ async function run() {
     await waitFor((event) => event.type === "run.status" && event.payload.chatId === chatId && event.payload.status === "idle", "post-tool completion");
   }
 
+  const reminderTitle = `Eva reminder e2e ${Date.now()}`;
+  const reminderRunAt = new Date(Date.now() + 5_000).toISOString();
+  received.length = 0;
+  send("reminder.create", {
+    title: reminderTitle,
+    notes: "Durable Object alarm delivery check",
+    runAt: reminderRunAt,
+    timezone: "UTC",
+    recurrence: "none",
+    appEnabled: true,
+    emailEnabled: false,
+  });
+  const reminder = await waitFor(
+    (event) => event.type === "reminder.updated" && event.payload.reminder.title === reminderTitle,
+    "reminder creation",
+  );
+  const notification = await waitFor(
+    (event) => event.type === "notification.created" && event.payload.notification.reminderId === reminder.payload.reminder.id,
+    "durable reminder delivery",
+  );
+  send("notification.read", { notificationId: notification.payload.notification.id });
+  await waitFor(
+    (event) => event.type === "notification.read" && event.payload.notificationId === notification.payload.notification.id,
+    "notification read receipt",
+  );
+  send("reminder.delete", { reminderId: reminder.payload.reminder.id });
+  await waitFor(
+    (event) => event.type === "reminder.deleted" && event.payload.reminderId === reminder.payload.reminder.id,
+    "reminder cleanup",
+  );
+
   send("memory.delete", { memoryId: memory.payload.memory.id });
   await waitFor((event) => event.type === "memory.deleted" && event.payload.memoryId === memory.payload.memory.id, "memory cleanup");
   send("memory.delete", { memoryId: savedByAgent.payload.memory.id });
@@ -211,6 +242,8 @@ async function run() {
       "workers-ai-stream",
       "concurrent-chats",
       "scoped-abort",
+      "durable-reminder-alarm",
+      "persistent-notification",
       ...skipBash ? [] : ["bash-approval", "sandbox"],
     ],
   }));

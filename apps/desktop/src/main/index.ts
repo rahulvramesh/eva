@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, shell, Tray } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification as ElectronNotification, safeStorage, shell, Tray } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
@@ -207,6 +207,16 @@ function registerIpc(): void {
     validateSender(event.senderFrame?.url ?? "");
     if (theme !== "light" && theme !== "dark") return;
     nativeTheme.themeSource = theme;
+  });
+  ipcMain.on("eva:notify", (event, value: { title?: unknown; body?: unknown }) => {
+    validateSender(event.senderFrame?.url ?? "");
+    if (typeof value?.title !== "string" || typeof value?.body !== "string") return;
+    const title = value.title.trim().slice(0, 200);
+    const body = value.body.trim().slice(0, 1_000);
+    if (!title || !ElectronNotification.isSupported()) return;
+    const notification = new ElectronNotification({ title, body, silent: false });
+    notification.on("click", showWindow);
+    notification.show();
   });
 }
 

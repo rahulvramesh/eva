@@ -7,6 +7,8 @@ import {
   type ChatMessage,
   type ClientCommand,
   type DeviceCapability,
+  type EvaNotification,
+  type Reminder,
   type MemoryKind,
   type RoutingPolicy,
   type ServerEvent,
@@ -48,6 +50,16 @@ import { runBash, runWebFetch } from "./tools";
 import { isPrivateCapableModel, shouldRouteToDevice } from "./routing";
 import { consumeChatCompletionStream } from "./model-stream";
 import { ChatRunRegistry } from "./chat-run-registry";
+import {
+  createReminder,
+  deleteReminder,
+  getNotificationPreferences,
+  listNotifications,
+  listReminders,
+  markNotificationRead,
+  updateNotificationPreferences,
+  updateReminder,
+} from "./reminders";
 
 type SocketAttachment = { userId: string; identity: string; device?: DeviceCapability };
 type ModelToolCall = { id: string; name: string; input: Record<string, unknown> };
@@ -68,6 +80,15 @@ const rememberInputSchema = z.object({
   kind: z.enum(["preference", "profile", "project", "instruction", "fact"]),
   content: z.string().trim().min(1).max(2_000),
   importance: z.number().int().min(1).max(10).default(5),
+});
+const scheduleReminderInputSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  notes: z.string().trim().max(4_000).default(""),
+  run_at: z.string().datetime({ offset: true }),
+  timezone: z.string().trim().min(1).max(100).optional(),
+  recurrence: z.enum(["none", "daily", "weekly", "monthly"]).default("none"),
+  app: z.boolean().default(true),
+  email: z.boolean().default(false),
 });
 
 const MODEL_TOOLS = [
@@ -101,6 +122,42 @@ const MODEL_TOOLS = [
         },
         required: ["kind", "content", "importance"],
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "schedule_reminder",
+      description: "Create a durable reminder that can notify the Eva app and email. Resolve relative dates using the current date and the user's configured timezone. Use an absolute ISO 8601 timestamp with an offset.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short reminder title." },
+          notes: { type: "string", description: "Optional reminder details." },
+          run_at: { type: "string", description: "Absolute ISO 8601 time including an offset, for example 2026-08-11T09:00:00+07:00." },
+          timezone: { type: "string", description: "Optional IANA timezone override. Omit to use the user's configured timezone." },
+          recurrence: { type: "string", enum: ["none", "daily", "weekly", "monthly"] },
+          app: { type: "boolean", description: "Deliver through Eva and native desktop notifications." },
+          email: { type: "boolean", description: "Also send to the configured reminder email." },
+        },
+        required: ["title", "run_at", "recurrence", "app", "email"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_reminders",
+      description: "List the user's current reminders, including IDs, times, recurrence, channels, and status.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "cancel_reminder",
+      description: "Cancel and permanently delete a reminder by ID. Call list_reminders first when the ID is not known.",
+      parameters: { type: "object", properties: { reminder_id: { type: "string" } }, required: ["reminder_id"] },
     },
   },
 ] satisfies ChatCompletionTool[];
@@ -239,6 +296,56 @@ export class EvaAgent extends DurableObject<Env> {
         await audit(this.env.DB, userId, "memory.deleted", command.memoryId);
         this.broadcast("memory.deleted", { memoryId: command.memoryId });
         return;
+      case "reminder.list":
+        this.send(socket, "reminder.snapshot", { reminders: await listReminders(this.env.DB, userId) });
+        return;
+      case "reminder.create": {
+        const reminder = await createReminder(this.env.DB, userId, command);
+        await this.env.REMINDER_SCHEDULER.getByName(userId).refresh(userId);
+        await audit(this.env.DB, userId, "reminder.created", reminder.id);
+        this.broadcast("reminder.updated", { reminder });
+        return;
+      }
+      case "reminder.update": {
+        const reminder = await updateReminder(this.env.DB, userId, {
+          id: command.reminderId,
+          title: command.title,
+          notes: command.notes,
+          runAt: command.runAt,
+          timezone: command.timezone,
+          recurrence: command.recurrence,
+          appEnabled: command.appEnabled,
+          emailEnabled: command.emailEnabled,
+          status: command.status,
+        });
+        await this.env.REMINDER_SCHEDULER.getByName(userId).refresh(userId);
+        await audit(this.env.DB, userId, "reminder.updated", reminder.id);
+        this.broadcast("reminder.updated", { reminder });
+        return;
+      }
+      case "reminder.delete":
+        await deleteReminder(this.env.DB, userId, command.reminderId);
+        await this.env.REMINDER_SCHEDULER.getByName(userId).refresh(userId);
+        await audit(this.env.DB, userId, "reminder.deleted", command.reminderId);
+        this.broadcast("reminder.deleted", { reminderId: command.reminderId });
+        this.broadcast("notification.snapshot", { notifications: await listNotifications(this.env.DB, userId) });
+        return;
+      case "notification.list":
+        this.send(socket, "notification.snapshot", { notifications: await listNotifications(this.env.DB, userId) });
+        return;
+      case "notification.read": {
+        const readAt = await markNotificationRead(this.env.DB, userId, command.notificationId);
+        this.broadcast("notification.read", { notificationId: command.notificationId, readAt });
+        return;
+      }
+      case "notification.preferences.get":
+        this.send(socket, "notification.preferences", { preferences: await getNotificationPreferences(this.env.DB, userId) });
+        return;
+      case "notification.preferences.update": {
+        const preferences = await updateNotificationPreferences(this.env.DB, userId, command);
+        this.broadcast("notification.preferences", { preferences });
+        return;
+      }
       case "run.abort":
         this.runs.requestAbort(command.chatId);
         await this.abortDeviceTurn(command.chatId);
@@ -535,11 +642,12 @@ export class EvaAgent extends DurableObject<Env> {
       this.broadcast("run.status", { chatId, status: "running" });
       this.broadcast("route.status", { chatId, turnId, host: "cloud", private: false, status: "running" });
 
-      const [chat, memories] = await Promise.all([
+      const [chat, memories, notificationPreferences] = await Promise.all([
         getChat(this.env.DB, userId, chatId),
         retrieveMemories(this.env, userId, content),
+        getNotificationPreferences(this.env.DB, userId),
       ]);
-      const messages = buildModelMessages(settings, memories, chat.messages.filter((message) => message.id !== assistant!.id));
+      const messages = buildModelMessages(settings, memories, notificationPreferences.timezone, chat.messages.filter((message) => message.id !== assistant!.id));
       await this.continueTurn(userId, chatId, assistant.id, messages, "");
       this.broadcast("route.status", { chatId, turnId, host: "cloud", private: false, status: "complete" });
     } catch (error) {
@@ -673,6 +781,36 @@ export class EvaAgent extends DurableObject<Env> {
         await enqueueMemory(this.env, userId, memory);
         this.broadcast("memory.updated", { memory });
         output = `Memory saved ✓ [${memory.id.slice(0, 8)}]: ${memory.content}`;
+      } else if (request.name === "schedule_reminder") {
+        const input = scheduleReminderInputSchema.parse(request.input);
+        const preferences = await getNotificationPreferences(this.env.DB, userId);
+        const reminder = await createReminder(this.env.DB, userId, {
+          title: input.title,
+          notes: input.notes,
+          runAt: input.run_at,
+          timezone: input.timezone ?? preferences.timezone,
+          recurrence: input.recurrence,
+          appEnabled: input.app,
+          emailEnabled: input.email,
+        });
+        await this.env.REMINDER_SCHEDULER.getByName(userId).refresh(userId);
+        this.broadcast("reminder.updated", { reminder });
+        const emailNote = input.email && (!preferences.emailEnabled || !preferences.email)
+          ? " Email delivery is requested but must be enabled with an address in Settings."
+          : "";
+        output = `Reminder scheduled ✓ [${reminder.id.slice(0, 8)}] for ${reminder.runAt} (${reminder.timezone}).${emailNote}`;
+      } else if (request.name === "list_reminders") {
+        const reminders = await listReminders(this.env.DB, userId);
+        output = reminders.length
+          ? reminders.map((reminder) => `${reminder.id} | ${reminder.status} | ${reminder.title} | ${reminder.nextRunAt ?? reminder.runAt} | ${reminder.timezone} | ${reminder.recurrence} | app=${reminder.appEnabled} email=${reminder.emailEnabled}`).join("\n")
+          : "No reminders are currently saved.";
+      } else if (request.name === "cancel_reminder") {
+        const input = z.object({ reminder_id: z.string().uuid() }).parse(request.input);
+        await deleteReminder(this.env.DB, userId, input.reminder_id);
+        await this.env.REMINDER_SCHEDULER.getByName(userId).refresh(userId);
+        this.broadcast("reminder.deleted", { reminderId: input.reminder_id });
+        this.broadcast("notification.snapshot", { notifications: await listNotifications(this.env.DB, userId) });
+        output = `Reminder cancelled ✓ [${input.reminder_id.slice(0, 8)}].`;
       } else {
         throw new Error(`Unknown tool ${request.name}.`);
       }
@@ -742,14 +880,22 @@ export class EvaAgent extends DurableObject<Env> {
   private broadcast<T extends ServerEventType>(type: T, payload: Extract<ServerEvent<T>, { type: T }>["payload"]): void {
     for (const socket of this.ctx.getWebSockets()) this.send(socket, type, payload);
   }
+
+  async notify(notification: EvaNotification): Promise<void> {
+    this.broadcast("notification.created", { notification });
+  }
+
+  async syncReminders(reminders: Reminder[]): Promise<void> {
+    this.broadcast("reminder.snapshot", { reminders });
+  }
 }
 
-function buildModelMessages(settings: AgentSettings, memories: Awaited<ReturnType<typeof retrieveMemories>>, history: ChatMessage[]): ModelMessage[] {
+function buildModelMessages(settings: AgentSettings, memories: Awaited<ReturnType<typeof retrieveMemories>>, timezone: string, history: ChatMessage[]): ModelMessage[] {
   const memoryContext = memories.length
     ? `\n\nRelevant long-term memories:\n${memories.map((memory) => `- [${memory.kind}] ${memory.content}`).join("\n")}`
     : "";
   return [
-    { role: "system", content: `${settings.systemInstructions}\n\n${MEMORY_SAFETY_INSTRUCTION}${memoryContext}` },
+    { role: "system", content: `${settings.systemInstructions}\n\nCurrent UTC time: ${new Date().toISOString()}. The user's configured timezone is ${timezone}. Use it for relative or unspecified reminder times; only override it when the user names another timezone.\n\n${MEMORY_SAFETY_INSTRUCTION}${memoryContext}` },
     ...history.slice(-40).map((message) => ({ role: message.role, content: message.content } as ModelMessage)),
   ];
 }

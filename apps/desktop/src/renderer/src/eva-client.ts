@@ -101,6 +101,9 @@ export class EvaClient {
       this.sendCloud(command("chat.list", {}));
       this.sendCloud(command("settings.get", {}));
       this.sendCloud(command("memory.list", {}));
+      this.sendCloud(command("reminder.list", {}));
+      this.sendCloud(command("notification.list", {}));
+      this.sendCloud(command("notification.preferences.get", {}));
       this.registerDevice();
       this.flushOutbox();
     });

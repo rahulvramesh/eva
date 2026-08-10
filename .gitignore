@@ -9,4 +9,5 @@ release/
 .eva-cloud-token
 build/Eva.iconset/
 *.log
+backups/
 .DS_Store

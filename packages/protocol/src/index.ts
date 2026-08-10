@@ -105,6 +105,46 @@ export const memorySchema = z.object({
 });
 export type Memory = z.infer<typeof memorySchema>;
 
+export const reminderRecurrenceSchema = z.enum(["none", "daily", "weekly", "monthly"]);
+export type ReminderRecurrence = z.infer<typeof reminderRecurrenceSchema>;
+export const reminderStatusSchema = z.enum(["active", "paused", "completed"]);
+export type ReminderStatus = z.infer<typeof reminderStatusSchema>;
+
+export const reminderSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  notes: z.string(),
+  runAt: z.string(),
+  nextRunAt: z.string().optional(),
+  timezone: z.string(),
+  recurrence: reminderRecurrenceSchema,
+  appEnabled: z.boolean(),
+  emailEnabled: z.boolean(),
+  status: reminderStatusSchema,
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  lastRunAt: z.string().optional(),
+});
+export type Reminder = z.infer<typeof reminderSchema>;
+
+export const notificationSchema = z.object({
+  id: z.string(),
+  reminderId: z.string().optional(),
+  title: z.string(),
+  body: z.string(),
+  createdAt: z.string(),
+  readAt: z.string().optional(),
+});
+export type EvaNotification = z.infer<typeof notificationSchema>;
+
+export const notificationPreferencesSchema = z.object({
+  email: z.string().email().or(z.literal("")),
+  appEnabled: z.boolean(),
+  emailEnabled: z.boolean(),
+  timezone: z.string().min(1).max(100),
+});
+export type NotificationPreferences = z.infer<typeof notificationPreferencesSchema>;
+
 const commandBase = z.object({
   version: z.literal(PROTOCOL_VERSION),
   requestId: z.string(),
@@ -174,6 +214,40 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     status: z.enum(["active", "archived"]),
   }),
   commandBase.extend({ type: z.literal("memory.delete"), memoryId: z.string() }),
+  commandBase.extend({ type: z.literal("reminder.list") }),
+  commandBase.extend({
+    type: z.literal("reminder.create"),
+    title: z.string().trim().min(1).max(200),
+    notes: z.string().trim().max(4_000).default(""),
+    runAt: z.string().datetime({ offset: true }),
+    timezone: z.string().trim().min(1).max(100),
+    recurrence: reminderRecurrenceSchema.default("none"),
+    appEnabled: z.boolean().default(true),
+    emailEnabled: z.boolean().default(false),
+  }),
+  commandBase.extend({
+    type: z.literal("reminder.update"),
+    reminderId: z.string(),
+    title: z.string().trim().min(1).max(200),
+    notes: z.string().trim().max(4_000),
+    runAt: z.string().datetime({ offset: true }),
+    timezone: z.string().trim().min(1).max(100),
+    recurrence: reminderRecurrenceSchema,
+    appEnabled: z.boolean(),
+    emailEnabled: z.boolean(),
+    status: reminderStatusSchema,
+  }),
+  commandBase.extend({ type: z.literal("reminder.delete"), reminderId: z.string() }),
+  commandBase.extend({ type: z.literal("notification.list") }),
+  commandBase.extend({ type: z.literal("notification.read"), notificationId: z.string() }),
+  commandBase.extend({ type: z.literal("notification.preferences.get") }),
+  commandBase.extend({
+    type: z.literal("notification.preferences.update"),
+    email: z.string().trim().email().or(z.literal("")),
+    appEnabled: z.boolean(),
+    emailEnabled: z.boolean(),
+    timezone: z.string().trim().min(1).max(100),
+  }),
 ]);
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
@@ -193,6 +267,13 @@ type EventPayloads = {
   "memory.snapshot": { memories: Memory[] };
   "memory.updated": { memory: Memory };
   "memory.deleted": { memoryId: string };
+  "reminder.snapshot": { reminders: Reminder[] };
+  "reminder.updated": { reminder: Reminder };
+  "reminder.deleted": { reminderId: string };
+  "notification.snapshot": { notifications: EvaNotification[] };
+  "notification.created": { notification: EvaNotification };
+  "notification.read": { notificationId: string; readAt: string };
+  "notification.preferences": { preferences: NotificationPreferences };
   "device.presence": { devices: DeviceCapability[] };
   "device.turn.request": { turnId: string; chat: Chat; content: string; routing: RoutingPolicy };
   "device.turn.abort": { turnId: string; chatId: string };
