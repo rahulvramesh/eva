@@ -9,6 +9,7 @@ declare global {
       saveCloudConfiguration(endpoint: string, token: string): Promise<void>;
       windowAction(action: "minimize" | "maximize" | "close"): void;
       setTheme(theme: "light" | "dark"): void;
+      openSettings(): void;
       notify(title: string, body: string): void;
       onNewChat(listener: () => void): () => void;
       onServerError(listener: (message: string) => void): () => void;

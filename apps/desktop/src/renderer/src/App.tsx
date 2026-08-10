@@ -16,6 +16,7 @@ import {
   Eye,
   EyeSlash,
   GlobeHemisphereWest,
+  GearSix,
   Info,
   Moon,
   Envelope,
@@ -27,6 +28,7 @@ import {
   TerminalWindow,
   Trash,
   WarningCircle,
+  X,
 } from "@phosphor-icons/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -135,6 +137,17 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("eva-routing-policy", routing);
   }, [routing]);
+
+  useEffect(() => {
+    const syncWindowPreference = (event: StorageEvent) => {
+      if (event.key === "eva-theme" && (event.newValue === "light" || event.newValue === "dark")) setTheme(event.newValue);
+      if (event.key === "eva-show-tool-calls") setShowToolCalls(event.newValue !== "false");
+      if (event.key === "eva-sync-offline-tool-output") setSyncOfflineToolOutput(event.newValue === "true");
+      if (event.key === "eva-routing-policy" && (event.newValue === "auto" || event.newValue === "cloud" || event.newValue === "device" || event.newValue === "private")) setRouting(event.newValue);
+    };
+    window.addEventListener("storage", syncWindowPreference);
+    return () => window.removeEventListener("storage", syncWindowPreference);
+  }, []);
 
   useEffect(() => {
     const node = transcriptRef.current;
@@ -316,6 +329,73 @@ export function App() {
     if (activeChat) clientRef.current?.send(command("run.abort", { chatId: activeChat.id }));
   }
 
+  function applyAgentSettings(next: AgentSettings): void {
+    clientRef.current?.send(command("settings.update", {
+      provider: next.selectedModel.provider,
+      modelId: next.selectedModel.id,
+      thinkingLevel: next.thinkingLevel,
+      systemInstructions: next.systemInstructions,
+    }));
+    setSettings(next);
+  }
+
+  function updateReminder(reminder: Reminder): void {
+    clientRef.current?.send(command("reminder.update", {
+      reminderId: reminder.id,
+      title: reminder.title,
+      notes: reminder.notes,
+      runAt: reminder.nextRunAt ?? reminder.runAt,
+      timezone: reminder.timezone,
+      recurrence: reminder.recurrence,
+      appEnabled: reminder.appEnabled,
+      emailEnabled: reminder.emailEnabled,
+      status: reminder.status,
+    }));
+  }
+
+  function updateNotificationPreferences(preferences: NotificationPreferences): void {
+    if (preferences.appEnabled && !window.eva && "Notification" in window && Notification.permission === "default") void Notification.requestPermission();
+    clientRef.current?.send(command("notification.preferences.update", preferences));
+  }
+
+  function showDedicatedSettings(): void {
+    setSettingsOpen(false);
+    if (window.eva) window.eva.openSettings();
+    else location.assign(`${location.pathname}?view=settings`);
+  }
+
+  const dedicatedSettings = new URLSearchParams(location.search).get("view") === "settings";
+  if (dedicatedSettings) {
+    if (authenticationRequired) return <div className="settings-window-shell"><CloudLogin onConnect={async (endpoint, token) => { await saveCloudConfiguration(endpoint, token); location.reload(); }} /></div>;
+    return (
+      <SettingsWindow
+        settings={settings}
+        connected={connected}
+        disabled={runningChats.size > 0}
+        theme={theme}
+        onThemeChange={setTheme}
+        showToolCalls={showToolCalls}
+        onShowToolCallsChange={setShowToolCalls}
+        syncOfflineToolOutput={syncOfflineToolOutput}
+        onSyncOfflineToolOutputChange={setSyncOfflineToolOutput}
+        memories={memories}
+        reminders={reminders}
+        notificationPreferences={notificationPreferences}
+        devices={devices}
+        routing={routing}
+        onRoutingChange={setRouting}
+        onMemoryCreate={(kind, content) => clientRef.current?.send(command("memory.create", { kind, content, importance: 5 }))}
+        onMemoryUpdate={(memory) => clientRef.current?.send(command("memory.update", { memoryId: memory.id, kind: memory.kind, content: memory.content, importance: memory.importance, status: memory.status }))}
+        onMemoryDelete={(memoryId) => clientRef.current?.send(command("memory.delete", { memoryId }))}
+        onReminderCreate={(input) => clientRef.current?.send(command("reminder.create", input))}
+        onReminderUpdate={updateReminder}
+        onReminderDelete={(reminderId) => clientRef.current?.send(command("reminder.delete", { reminderId }))}
+        onNotificationPreferences={updateNotificationPreferences}
+        onApply={applyAgentSettings}
+      />
+    );
+  }
+
   return (
     <div className="app-shell">
       {authenticationRequired && (
@@ -415,53 +495,11 @@ export function App() {
               <SettingsPopover
                 settings={settings}
                 disabled={runningChats.size > 0}
-                theme={theme}
-                onThemeChange={setTheme}
-                showToolCalls={showToolCalls}
-                onShowToolCallsChange={setShowToolCalls}
-                syncOfflineToolOutput={syncOfflineToolOutput}
-                onSyncOfflineToolOutputChange={setSyncOfflineToolOutput}
-                memories={memories}
-                reminders={reminders}
-                notificationPreferences={notificationPreferences}
                 devices={devices}
-                routing={routing}
-                onRoutingChange={setRouting}
-                onMemoryCreate={(kind, content) => clientRef.current?.send(command("memory.create", { kind, content, importance: 5 }))}
-                onMemoryUpdate={(memory) => clientRef.current?.send(command("memory.update", {
-                  memoryId: memory.id,
-                  kind: memory.kind,
-                  content: memory.content,
-                  importance: memory.importance,
-                  status: memory.status,
-                }))}
-                onMemoryDelete={(memoryId) => clientRef.current?.send(command("memory.delete", { memoryId }))}
-                onReminderCreate={(input) => clientRef.current?.send(command("reminder.create", input))}
-                onReminderUpdate={(reminder) => clientRef.current?.send(command("reminder.update", {
-                  reminderId: reminder.id,
-                  title: reminder.title,
-                  notes: reminder.notes,
-                  runAt: reminder.nextRunAt ?? reminder.runAt,
-                  timezone: reminder.timezone,
-                  recurrence: reminder.recurrence,
-                  appEnabled: reminder.appEnabled,
-                  emailEnabled: reminder.emailEnabled,
-                  status: reminder.status,
-                }))}
-                onReminderDelete={(reminderId) => clientRef.current?.send(command("reminder.delete", { reminderId }))}
-                onNotificationPreferences={(preferences) => {
-                  if (preferences.appEnabled && !window.eva && "Notification" in window && Notification.permission === "default") void Notification.requestPermission();
-                  clientRef.current?.send(command("notification.preferences.update", preferences));
-                }}
+                onOpenSettings={showDedicatedSettings}
                 onClose={() => setSettingsOpen(false)}
                 onApply={(next) => {
-                  clientRef.current?.send(command("settings.update", {
-                    provider: next.selectedModel.provider,
-                    modelId: next.selectedModel.id,
-                    thinkingLevel: next.thinkingLevel,
-                    systemInstructions: next.systemInstructions,
-                  }));
-                  setSettings(next);
+                  applyAgentSettings(next);
                   setSettingsOpen(false);
                 }}
               />
@@ -636,68 +674,17 @@ function CloudLogin({ onConnect }: { onConnect: (endpoint: string, token: string
   );
 }
 
-function SettingsPopover({
-  settings,
-  disabled,
-  theme,
-  onThemeChange,
-  showToolCalls,
-  onShowToolCallsChange,
-  syncOfflineToolOutput,
-  onSyncOfflineToolOutputChange,
-  memories,
-  reminders,
-  notificationPreferences,
-  devices,
-  routing,
-  onRoutingChange,
-  onMemoryCreate,
-  onMemoryUpdate,
-  onMemoryDelete,
-  onReminderCreate,
-  onReminderUpdate,
-  onReminderDelete,
-  onNotificationPreferences,
-  onClose,
-  onApply,
-}: {
+function SettingsPopover({ settings, disabled, devices, onOpenSettings, onClose, onApply }: {
   settings: AgentSettings;
   disabled: boolean;
-  theme: "light" | "dark";
-  onThemeChange: (theme: "light" | "dark") => void;
-  showToolCalls: boolean;
-  onShowToolCallsChange: (show: boolean) => void;
-  syncOfflineToolOutput: boolean;
-  onSyncOfflineToolOutputChange: (sync: boolean) => void;
-  memories: Memory[];
-  reminders: Reminder[];
-  notificationPreferences: NotificationPreferences;
   devices: DeviceCapability[];
-  routing: RoutingPolicy;
-  onRoutingChange: (routing: RoutingPolicy) => void;
-  onMemoryCreate: (kind: MemoryKind, content: string) => void;
-  onMemoryUpdate: (memory: Memory) => void;
-  onMemoryDelete: (memoryId: string) => void;
-  onReminderCreate: (input: {
-    title: string; notes: string; runAt: string; timezone: string; recurrence: ReminderRecurrence; appEnabled: boolean; emailEnabled: boolean;
-  }) => void;
-  onReminderUpdate: (reminder: Reminder) => void;
-  onReminderDelete: (reminderId: string) => void;
-  onNotificationPreferences: (preferences: NotificationPreferences) => void;
+  onOpenSettings: () => void;
   onClose: () => void;
   onApply: (settings: AgentSettings) => void;
 }) {
   const [draft, setDraft] = useState(settings);
-  const [memoryDraft, setMemoryDraft] = useState("");
-  const [memoryKind, setMemoryKind] = useState<MemoryKind>("preference");
   const panelRef = useRef<HTMLDivElement>(null);
-  const providers = useMemo(() => {
-    const grouped = new Map<string, AgentSettings["models"]>();
-    for (const model of draft.models) grouped.set(model.provider, [...(grouped.get(model.provider) ?? []), model]);
-    return [...grouped.entries()];
-  }, [draft.models]);
-  const selected = draft.models.find((model) => model.provider === draft.selectedModel.provider && model.id === draft.selectedModel.id);
-  const changed = JSON.stringify({ ...draft, models: undefined }) !== JSON.stringify({ ...settings, models: undefined });
+  const changed = agentSettingsChanged(draft, settings);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
@@ -714,184 +701,136 @@ function SettingsPopover({
   }, [onClose]);
 
   return (
-    <div className="settings-popover" ref={panelRef} role="dialog" aria-label="Assistant settings">
+    <div className="settings-popover model-popover" ref={panelRef} role="dialog" aria-label="Model settings">
       <div className="settings-heading">
-        <div><img className="eva-settings-icon" src={evaLogo} alt="" /><span>Assistant Settings</span></div>
-        <span>{draft.models.length} models</span>
+        <div><img className="eva-settings-icon" src={evaLogo} alt="" /><span>Model</span></div>
+        <span>{draft.models.length} available</span>
       </div>
-
-      <label className="settings-field">
-        <span>Model</span>
-        <div className="select-wrap">
-          <Brain weight="fill" />
-          <select
-            value={`${draft.selectedModel.provider}/${draft.selectedModel.id}`}
-            onChange={(event) => {
-              const model = draft.models.find((item) => `${item.provider}/${item.id}` === event.target.value);
-              if (!model) return;
-              setDraft((current) => ({
-                ...current,
-                selectedModel: { provider: model.provider, id: model.id },
-                thinkingLevel: model.thinkingLevels.includes(current.thinkingLevel) ? current.thinkingLevel : model.thinkingLevels[0] ?? "off",
-              }));
-            }}
-          >
-            {providers.map(([provider, models]) => (
-              <optgroup key={provider} label={formatProvider(provider)}>
-                {models.map((model) => <option key={`${model.provider}/${model.id}/${model.deviceId ?? "cloud"}`} value={`${model.provider}/${model.id}`}>{model.name} · {model.executionHost === "device" ? deviceName(devices, model.deviceId) : "Cloud"}</option>)}
-              </optgroup>
-            ))}
-          </select>
-          <CaretDown weight="bold" />
-        </div>
-        {selected?.contextWindow && <small>{formatProvider(selected.provider)} · {formatContext(selected.contextWindow)} context · {selected.executionHost === "device" ? deviceName(devices, selected.deviceId) : "Eva Cloud"}</small>}
-      </label>
-
-      <label className="settings-field">
-        <span>System Instructions</span>
-        <textarea
-          rows={4}
-          value={draft.systemInstructions}
-          onChange={(event) => setDraft((current) => ({ ...current, systemInstructions: event.target.value }))}
-          placeholder="Pass additional instructions to Eva, for example tone, role, or output format."
-        />
-      </label>
-
-      <label className="settings-field">
-        <span className="field-title">Reasoning Effort <Info weight="bold" aria-label="Available levels depend on the selected model" /></span>
-        <div className="select-wrap effort">
-          <Brain weight="regular" />
-          <select
-            value={draft.thinkingLevel}
-            onChange={(event) => setDraft((current) => ({ ...current, thinkingLevel: event.target.value as ThinkingLevel }))}
-          >
-            {(selected?.thinkingLevels ?? ["off"]).map((level) => <option key={level} value={level}>{formatThinkingLevel(level)}</option>)}
-          </select>
-          <CaretDown weight="bold" />
-        </div>
-      </label>
-
-      <div className="appearance-field">
-        <span>Appearance</span>
-        <div className="theme-switch" role="group" aria-label="Appearance">
-          <button type="button" className={theme === "light" ? "active" : ""} onClick={() => onThemeChange("light")} aria-pressed={theme === "light"}>
-            <Sun weight="fill" /> Light
-          </button>
-          <button type="button" className={theme === "dark" ? "active" : ""} onClick={() => onThemeChange("dark")} aria-pressed={theme === "dark"}>
-            <Moon weight="fill" /> Dark
-          </button>
-        </div>
-      </div>
-
-      <div className="appearance-field tool-visibility-field">
-        <span>Tool Call Details</span>
-        <div className="theme-switch" role="group" aria-label="Tool call details">
-          <button type="button" className={showToolCalls ? "active" : ""} onClick={() => onShowToolCallsChange(true)} aria-pressed={showToolCalls}>
-            <Eye weight="bold" /> Show
-          </button>
-          <button type="button" className={!showToolCalls ? "active" : ""} onClick={() => onShowToolCallsChange(false)} aria-pressed={!showToolCalls}>
-            <EyeSlash weight="bold" /> Hide
-          </button>
-        </div>
-        <small>Shows commands, fetched URLs, output, and completion status in the conversation.</small>
-      </div>
-
-      <div className="appearance-field tool-visibility-field">
-        <span>Offline Tool Output Sync</span>
-        <div className="theme-switch" role="group" aria-label="Offline tool output sync">
-          <button type="button" className={!syncOfflineToolOutput ? "active" : ""} onClick={() => onSyncOfflineToolOutputChange(false)} aria-pressed={!syncOfflineToolOutput}>
-            <EyeSlash weight="bold" /> Keep local
-          </button>
-          <button type="button" className={syncOfflineToolOutput ? "active" : ""} onClick={() => onSyncOfflineToolOutputChange(true)} aria-pressed={syncOfflineToolOutput}>
-            <Cloud weight="fill" /> Sync output
-          </button>
-        </div>
-        <small>Chat responses always sync after reconnect. Command output stays on the device by default to reduce accidental data exposure.</small>
-      </div>
-
-      <div className="appearance-field">
-        <span>Execution</span>
-        <div className="route-grid" role="group" aria-label="Execution preference">
-          <button type="button" className={routing === "auto" ? "active" : ""} onClick={() => onRoutingChange("auto")} aria-pressed={routing === "auto"}>
-            <Sparkle weight="fill" /> Auto
-          </button>
-          <button type="button" className={routing === "cloud" ? "active" : ""} onClick={() => onRoutingChange("cloud")} aria-pressed={routing === "cloud"}>
-            <Cloud weight="fill" /> Cloud
-          </button>
-          <button type="button" className={routing === "device" ? "active" : ""} onClick={() => onRoutingChange("device")} aria-pressed={routing === "device"}>
-            <TerminalWindow weight="bold" /> This device
-          </button>
-          <button type="button" className={routing === "private" ? "active" : ""} onClick={() => onRoutingChange("private")} aria-pressed={routing === "private"}>
-            <EyeSlash weight="bold" /> Private
-          </button>
-        </div>
-        <small>{routingDescription(routing)}</small>
-        <div className="device-list">
-          {devices.length ? devices.map((device) => (
-            <div key={device.id} className={device.online ? "device online" : "device"}>
-              <Circle weight="fill" />
-              <span>{device.name}</span>
-              <small>{device.online ? `${device.models.length} models · Bash and files ready` : "Offline"}</small>
-            </div>
-          )) : <div className="device"><Circle weight="fill" /><span>No device connected</span><small>Cloud-only tasks remain available</small></div>}
-        </div>
-      </div>
-
-      <ReminderSettings
-        reminders={reminders}
-        preferences={notificationPreferences}
-        onCreate={onReminderCreate}
-        onUpdate={onReminderUpdate}
-        onDelete={onReminderDelete}
-        onPreferences={onNotificationPreferences}
-      />
-
-        <div className="memory-settings">
-          <div className="memory-heading"><span>Online Memory</span><strong>{memories.filter((memory) => memory.status === "active").length}</strong></div>
-          <div className="memory-create">
-            <select value={memoryKind} onChange={(event) => setMemoryKind(event.target.value as MemoryKind)} aria-label="Memory type">
-              <option value="preference">Preference</option>
-              <option value="profile">Profile</option>
-              <option value="project">Project</option>
-              <option value="instruction">Instruction</option>
-              <option value="fact">Fact</option>
-            </select>
-            <input value={memoryDraft} onChange={(event) => setMemoryDraft(event.target.value)} placeholder="Something Eva should remember…" maxLength={2000} />
-            <button
-              type="button"
-              disabled={!memoryDraft.trim()}
-              onClick={() => {
-                onMemoryCreate(memoryKind, memoryDraft.trim());
-                setMemoryDraft("");
-              }}
-              aria-label="Add memory"
-            ><Plus weight="bold" /></button>
-          </div>
-          <div className="memory-list">
-            {memories.length ? memories.slice(0, 30).map((memory) => (
-              <div className={`memory-item ${memory.status}`} key={memory.id}>
-                <button
-                  type="button"
-                  className="memory-content"
-                  onClick={() => onMemoryUpdate({ ...memory, status: memory.status === "active" ? "archived" : "active" })}
-                  title={memory.status === "active" ? "Archive memory" : "Restore memory"}
-                >
-                  <span>{memory.kind}</span>
-                  <p>{memory.content}</p>
-                </button>
-                <button type="button" className="memory-delete" onClick={() => onMemoryDelete(memory.id)} aria-label={`Delete memory: ${memory.content}`}><Trash weight="bold" /></button>
-              </div>
-            )) : <p className="memory-empty">Eva has no long-term memories yet.</p>}
-          </div>
-          <small>Click a memory to archive or restore it. Deleted memories are removed from semantic retrieval.</small>
-        </div>
-
+      <AgentModelFields draft={draft} devices={devices} onChange={setDraft} compact />
+      <button type="button" className="open-settings-button" onClick={onOpenSettings}><GearSix weight="bold" /><span><strong>Open Eva Settings</strong><small>Appearance, tools, execution, reminders, and memory</small></span><ArrowRight weight="bold" /></button>
       <div className="settings-footer">
-        <span>Model changes apply to the next message</span>
+        <span>Applies to the next message</span>
         <button type="button" onClick={() => onApply(draft)} disabled={!changed || disabled}>Apply</button>
       </div>
     </div>
   );
+}
+
+function AgentModelFields({ draft, devices, onChange, compact = false }: {
+  draft: AgentSettings;
+  devices: DeviceCapability[];
+  onChange: (settings: AgentSettings) => void;
+  compact?: boolean;
+}) {
+  const providers = useMemo(() => {
+    const grouped = new Map<string, AgentSettings["models"]>();
+    for (const model of draft.models) grouped.set(model.provider, [...(grouped.get(model.provider) ?? []), model]);
+    return [...grouped.entries()];
+  }, [draft.models]);
+  const selected = draft.models.find((model) => model.provider === draft.selectedModel.provider && model.id === draft.selectedModel.id);
+
+  return <div className={compact ? "agent-model-fields compact" : "agent-model-fields"}>
+    <label className="settings-field">
+      <span>Model</span>
+      <div className="select-wrap">
+        <Brain weight="fill" />
+        <select value={`${draft.selectedModel.provider}/${draft.selectedModel.id}`} onChange={(event) => {
+          const model = draft.models.find((item) => `${item.provider}/${item.id}` === event.target.value);
+          if (!model) return;
+          onChange({ ...draft, selectedModel: { provider: model.provider, id: model.id }, thinkingLevel: model.thinkingLevels.includes(draft.thinkingLevel) ? draft.thinkingLevel : model.thinkingLevels[0] ?? "off" });
+        }}>
+          {providers.map(([provider, models]) => <optgroup key={provider} label={formatProvider(provider)}>{models.map((model) => <option key={`${model.provider}/${model.id}/${model.deviceId ?? "cloud"}`} value={`${model.provider}/${model.id}`}>{model.name} · {model.executionHost === "device" ? deviceName(devices, model.deviceId) : "Cloud"}</option>)}</optgroup>)}
+        </select>
+        <CaretDown weight="bold" />
+      </div>
+      {selected?.contextWindow && <small>{formatProvider(selected.provider)} · {formatContext(selected.contextWindow)} context · {selected.executionHost === "device" ? deviceName(devices, selected.deviceId) : "Eva Cloud"}</small>}
+    </label>
+    <label className="settings-field">
+      <span className="field-title">Reasoning Effort <Info weight="bold" aria-label="Available levels depend on the selected model" /></span>
+      <div className="select-wrap effort"><Brain weight="regular" /><select value={draft.thinkingLevel} onChange={(event) => onChange({ ...draft, thinkingLevel: event.target.value as ThinkingLevel })}>{(selected?.thinkingLevels ?? ["off"]).map((level) => <option key={level} value={level}>{formatThinkingLevel(level)}</option>)}</select><CaretDown weight="bold" /></div>
+    </label>
+    <label className="settings-field model-instructions">
+      <span>System Instructions</span>
+      <textarea rows={compact ? 3 : 5} value={draft.systemInstructions} onChange={(event) => onChange({ ...draft, systemInstructions: event.target.value })} placeholder="Set Eva's tone, role, or output format." />
+    </label>
+  </div>;
+}
+
+type SettingsWindowProps = {
+  settings?: AgentSettings;
+  connected: boolean;
+  disabled: boolean;
+  theme: "light" | "dark";
+  onThemeChange: (theme: "light" | "dark") => void;
+  showToolCalls: boolean;
+  onShowToolCallsChange: (show: boolean) => void;
+  syncOfflineToolOutput: boolean;
+  onSyncOfflineToolOutputChange: (sync: boolean) => void;
+  memories: Memory[];
+  reminders: Reminder[];
+  notificationPreferences: NotificationPreferences;
+  devices: DeviceCapability[];
+  routing: RoutingPolicy;
+  onRoutingChange: (routing: RoutingPolicy) => void;
+  onMemoryCreate: (kind: MemoryKind, content: string) => void;
+  onMemoryUpdate: (memory: Memory) => void;
+  onMemoryDelete: (memoryId: string) => void;
+  onReminderCreate: (input: { title: string; notes: string; runAt: string; timezone: string; recurrence: ReminderRecurrence; appEnabled: boolean; emailEnabled: boolean }) => void;
+  onReminderUpdate: (reminder: Reminder) => void;
+  onReminderDelete: (reminderId: string) => void;
+  onNotificationPreferences: (preferences: NotificationPreferences) => void;
+  onApply: (settings: AgentSettings) => void;
+};
+
+function SettingsWindow(props: SettingsWindowProps) {
+  const { settings, connected, disabled, theme, onThemeChange, showToolCalls, onShowToolCallsChange, syncOfflineToolOutput, onSyncOfflineToolOutputChange, memories, reminders, notificationPreferences, devices, routing, onRoutingChange, onMemoryCreate, onMemoryUpdate, onMemoryDelete, onReminderCreate, onReminderUpdate, onReminderDelete, onNotificationPreferences, onApply } = props;
+  const [draft, setDraft] = useState(settings);
+  useEffect(() => { if (settings) setDraft(settings); }, [settings]);
+  const changed = Boolean(draft && settings && agentSettingsChanged(draft, settings));
+  const close = () => window.eva ? window.eva.windowAction("close") : history.back();
+
+  return <div className="settings-window-shell">
+    <header className="settings-window-header">
+      <div><img src={evaLogo} alt="" /><span><strong>Eva Settings</strong><small>{connected ? "Synced with Eva Cloud" : "Connecting…"}</small></span></div>
+      <button type="button" onClick={close} aria-label="Close settings"><X weight="bold" /></button>
+    </header>
+    {!draft ? <div className="settings-window-loading"><Circle weight="fill" /> Loading settings…</div> : <main className="settings-window-content">
+      <section className="settings-window-section">
+        <div className="settings-section-heading"><span><Brain weight="fill" /> Agent</span><small>Choose Eva's model and default behavior.</small></div>
+        <AgentModelFields draft={draft} devices={devices} onChange={setDraft} />
+        <button type="button" className="settings-save" onClick={() => onApply(draft)} disabled={!changed || disabled}>Save agent settings</button>
+      </section>
+
+      <section className="settings-window-section">
+        <div className="settings-section-heading"><span><Sun weight="fill" /> Appearance & activity</span><small>Control how Eva looks and how much execution detail is shown.</small></div>
+        <div className="settings-option-grid">
+          <div className="appearance-field"><span>Appearance</span><div className="theme-switch" role="group" aria-label="Appearance"><button type="button" className={theme === "light" ? "active" : ""} onClick={() => onThemeChange("light")}><Sun weight="fill" /> Light</button><button type="button" className={theme === "dark" ? "active" : ""} onClick={() => onThemeChange("dark")}><Moon weight="fill" /> Dark</button></div></div>
+          <div className="appearance-field"><span>Tool call details</span><div className="theme-switch" role="group" aria-label="Tool call details"><button type="button" className={showToolCalls ? "active" : ""} onClick={() => onShowToolCallsChange(true)}><Eye weight="bold" /> Show</button><button type="button" className={!showToolCalls ? "active" : ""} onClick={() => onShowToolCallsChange(false)}><EyeSlash weight="bold" /> Hide</button></div></div>
+          <div className="appearance-field wide"><span>Offline tool output</span><div className="theme-switch" role="group" aria-label="Offline tool output sync"><button type="button" className={!syncOfflineToolOutput ? "active" : ""} onClick={() => onSyncOfflineToolOutputChange(false)}><EyeSlash weight="bold" /> Keep local</button><button type="button" className={syncOfflineToolOutput ? "active" : ""} onClick={() => onSyncOfflineToolOutputChange(true)}><Cloud weight="fill" /> Sync output</button></div><small>Chat responses sync after reconnect. Command output stays private by default.</small></div>
+        </div>
+      </section>
+
+      <section className="settings-window-section">
+        <div className="settings-section-heading"><span><TerminalWindow weight="bold" /> Execution</span><small>Choose where Eva runs tasks requiring models, files, or Bash.</small></div>
+        <div className="route-grid" role="group" aria-label="Execution preference">{(["auto", "cloud", "device", "private"] as RoutingPolicy[]).map((value) => <button type="button" key={value} className={routing === value ? "active" : ""} onClick={() => onRoutingChange(value)}>{value === "auto" ? <Sparkle weight="fill" /> : value === "cloud" ? <Cloud weight="fill" /> : value === "device" ? <TerminalWindow weight="bold" /> : <EyeSlash weight="bold" />}{value === "device" ? "This device" : value[0]!.toUpperCase() + value.slice(1)}</button>)}</div>
+        <p className="settings-description">{routingDescription(routing)}</p>
+        <div className="device-list">{devices.length ? devices.map((device) => <div key={device.id} className={device.online ? "device online" : "device"}><Circle weight="fill" /><span>{device.name}</span><small>{device.online ? `${device.models.length} models · Bash and files ready` : "Offline"}</small></div>) : <div className="device"><Circle weight="fill" /><span>No device connected</span><small>Cloud-only tasks remain available</small></div>}</div>
+      </section>
+
+      <section className="settings-window-section"><ReminderSettings reminders={reminders} preferences={notificationPreferences} onCreate={onReminderCreate} onUpdate={onReminderUpdate} onDelete={onReminderDelete} onPreferences={onNotificationPreferences} /></section>
+      <section className="settings-window-section"><MemorySettings memories={memories} onCreate={onMemoryCreate} onUpdate={onMemoryUpdate} onDelete={onMemoryDelete} /></section>
+    </main>}
+  </div>;
+}
+
+function MemorySettings({ memories, onCreate, onUpdate, onDelete }: { memories: Memory[]; onCreate: (kind: MemoryKind, content: string) => void; onUpdate: (memory: Memory) => void; onDelete: (memoryId: string) => void }) {
+  const [draft, setDraft] = useState("");
+  const [kind, setKind] = useState<MemoryKind>("preference");
+  return <div className="memory-settings dedicated-memory-settings">
+    <div className="settings-section-heading"><span><Brain weight="fill" /> Online Memory <strong>{memories.filter((memory) => memory.status === "active").length}</strong></span><small>Facts and preferences available across every Eva chat.</small></div>
+    <div className="memory-create"><select value={kind} onChange={(event) => setKind(event.target.value as MemoryKind)} aria-label="Memory type"><option value="preference">Preference</option><option value="profile">Profile</option><option value="project">Project</option><option value="instruction">Instruction</option><option value="fact">Fact</option></select><input value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Something Eva should remember…" maxLength={2000} /><button type="button" disabled={!draft.trim()} onClick={() => { onCreate(kind, draft.trim()); setDraft(""); }} aria-label="Add memory"><Plus weight="bold" /></button></div>
+    <div className="memory-list">{memories.length ? memories.slice(0, 50).map((memory) => <div className={`memory-item ${memory.status}`} key={memory.id}><button type="button" className="memory-content" onClick={() => onUpdate({ ...memory, status: memory.status === "active" ? "archived" : "active" })}><span>{memory.kind}</span><p>{memory.content}</p></button><button type="button" className="memory-delete" onClick={() => onDelete(memory.id)} aria-label={`Delete memory: ${memory.content}`}><Trash weight="bold" /></button></div>) : <p className="memory-empty">Eva has no long-term memories yet.</p>}</div>
+  </div>;
 }
 
 function ReminderSettings({
@@ -1107,6 +1046,10 @@ function formatNotificationDate(iso: string): string {
 
 function selectedModelName(settings: AgentSettings): string {
   return settings.models.find((model) => model.provider === settings.selectedModel.provider && model.id === settings.selectedModel.id)?.name ?? "Choose model";
+}
+
+function agentSettingsChanged(next: AgentSettings, current: AgentSettings): boolean {
+  return JSON.stringify({ ...next, models: undefined }) !== JSON.stringify({ ...current, models: undefined });
 }
 
 function deviceName(devices: DeviceCapability[], deviceId?: string): string {

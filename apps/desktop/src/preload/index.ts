@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("eva", {
   saveCloudConfiguration: (endpoint: string, token: string) => ipcRenderer.invoke("eva:cloud-config:set", { endpoint, token }),
   windowAction: (action: "minimize" | "maximize" | "close") => ipcRenderer.send("eva:window", action),
   setTheme: (theme: "light" | "dark") => ipcRenderer.send("eva:theme", theme),
+  openSettings: () => ipcRenderer.send("eva:settings:open"),
   notify: (title: string, body: string) => ipcRenderer.send("eva:notify", { title, body }),
   onNewChat: (listener: () => void) => {
     const handler = () => listener();

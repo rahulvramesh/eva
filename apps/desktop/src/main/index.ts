@@ -11,6 +11,7 @@ type WindowState = { width: number; height: number; x?: number; y?: number };
 type CloudConfiguration = { endpoint: string; token: string };
 
 let mainWindow: BrowserWindow | null = null;
+let settingsWindow: BrowserWindow | null = null;
 let agentProcess: ChildProcess | null = null;
 let connection: ConnectionInfo | null = null;
 let tray: Tray | null = null;
@@ -100,6 +101,46 @@ function createWindow(): void {
   }
 }
 
+function showSettingsWindow(): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.show();
+    settingsWindow.focus();
+    return;
+  }
+
+  settingsWindow = new BrowserWindow({
+    parent: mainWindow ?? undefined,
+    width: 760,
+    height: 720,
+    minWidth: 600,
+    minHeight: 560,
+    show: false,
+    title: "Eva Settings",
+    backgroundColor: nativeTheme.shouldUseDarkColors ? "#111312" : "#f2f5f1",
+    ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
+    webPreferences: {
+      preload: join(__dirname, "../preload/index.cjs"),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+  settingsWindow.once("ready-to-show", () => settingsWindow?.show());
+  settingsWindow.on("closed", () => { settingsWindow = null; });
+  settingsWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\//.test(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    const url = new URL(process.env.ELECTRON_RENDERER_URL);
+    url.searchParams.set("view", "settings");
+    void settingsWindow.loadURL(url.toString());
+  } else {
+    void settingsWindow.loadFile(join(__dirname, "../renderer/index.html"), { query: { view: "settings" } });
+  }
+}
+
 function createTray(): void {
   const iconName = process.platform === "darwin" ? "trayTemplate.png" : "icon.png";
   const iconPath = app.isPackaged
@@ -133,6 +174,11 @@ function updateTrayMenu(): void {
         showWindow();
         mainWindow?.webContents.send("eva:new-chat");
       },
+    },
+    {
+      label: "Settings…",
+      accelerator: "CommandOrControl+,",
+      click: showSettingsWindow,
     },
     { type: "separator" },
     {
@@ -207,6 +253,10 @@ function registerIpc(): void {
     validateSender(event.senderFrame?.url ?? "");
     if (theme !== "light" && theme !== "dark") return;
     nativeTheme.themeSource = theme;
+  });
+  ipcMain.on("eva:settings:open", (event) => {
+    validateSender(event.senderFrame?.url ?? "");
+    showSettingsWindow();
   });
   ipcMain.on("eva:notify", (event, value: { title?: unknown; body?: unknown }) => {
     validateSender(event.senderFrame?.url ?? "");
