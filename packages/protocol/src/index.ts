@@ -18,7 +18,7 @@ export const toolCallSchema = z.object({
   name: z.string(),
   input: z.record(z.string(), z.unknown()),
   output: z.string(),
-  status: z.enum(["running", "complete", "error"]),
+  status: z.enum(["pending", "running", "complete", "error", "rejected"]),
   createdAt: z.string(),
   completedAt: z.string().optional(),
 });
@@ -62,6 +62,23 @@ export const agentSettingsSchema = z.object({
 });
 export type AgentSettings = z.infer<typeof agentSettingsSchema>;
 
+export const memoryKindSchema = z.enum(["preference", "profile", "project", "instruction", "fact"]);
+export type MemoryKind = z.infer<typeof memoryKindSchema>;
+
+export const memorySchema = z.object({
+  id: z.string(),
+  kind: memoryKindSchema,
+  content: z.string(),
+  importance: z.number().int().min(1).max(10),
+  sourceChatId: z.string().optional(),
+  sourceMessageId: z.string().optional(),
+  status: z.enum(["active", "archived"]),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  lastUsedAt: z.string().optional(),
+});
+export type Memory = z.infer<typeof memorySchema>;
+
 const commandBase = z.object({
   version: z.literal(PROTOCOL_VERSION),
   requestId: z.string(),
@@ -77,6 +94,8 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     content: z.string().trim().min(1).max(100_000),
   }),
   commandBase.extend({ type: z.literal("run.abort"), chatId: z.string() }),
+  commandBase.extend({ type: z.literal("tool.approve"), toolCallId: z.string() }),
+  commandBase.extend({ type: z.literal("tool.reject"), toolCallId: z.string() }),
   commandBase.extend({ type: z.literal("settings.get") }),
   commandBase.extend({
     type: z.literal("settings.update"),
@@ -85,12 +104,28 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     thinkingLevel: thinkingLevelSchema,
     systemInstructions: z.string().max(20_000),
   }),
+  commandBase.extend({ type: z.literal("memory.list") }),
+  commandBase.extend({
+    type: z.literal("memory.create"),
+    kind: memoryKindSchema,
+    content: z.string().trim().min(1).max(2_000),
+    importance: z.number().int().min(1).max(10).default(5),
+  }),
+  commandBase.extend({
+    type: z.literal("memory.update"),
+    memoryId: z.string(),
+    kind: memoryKindSchema,
+    content: z.string().trim().min(1).max(2_000),
+    importance: z.number().int().min(1).max(10),
+    status: z.enum(["active", "archived"]),
+  }),
+  commandBase.extend({ type: z.literal("memory.delete"), memoryId: z.string() }),
 ]);
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 
 type EventPayloads = {
-  "server.hello": { protocolVersion: number; agentMode: "pi" | "fake" };
+  "server.hello": { protocolVersion: number; agentMode: "pi" | "fake" | "cloud" };
   "chat.list": { chats: ChatSummary[] };
   "chat.created": { chat: Chat };
   "chat.snapshot": { chat: Chat };
@@ -101,6 +136,9 @@ type EventPayloads = {
   "run.status": { chatId: string; status: "running" | "idle" | "aborted" | "error" };
   "settings.snapshot": { settings: AgentSettings };
   "settings.updated": { settings: AgentSettings };
+  "memory.snapshot": { memories: Memory[] };
+  "memory.updated": { memory: Memory };
+  "memory.deleted": { memoryId: string };
   "server.error": { code: string; message: string; requestId?: string };
 };
 

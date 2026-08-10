@@ -7,6 +7,7 @@ import {
   ChatCircleDots,
   CheckCircle,
   Circle,
+  Cloud,
   Code,
   Eye,
   EyeSlash,
@@ -19,6 +20,7 @@ import {
   Stop,
   Sun,
   TerminalWindow,
+  Trash,
   WarningCircle,
 } from "@phosphor-icons/react";
 import ReactMarkdown from "react-markdown";
@@ -29,11 +31,13 @@ import {
   type ChatMessage,
   type ChatSummary,
   type AgentSettings,
+  type Memory,
+  type MemoryKind,
   type ThinkingLevel,
   type ServerEvent,
   type ToolCall,
 } from "../../../../../packages/protocol/src/index";
-import { EvaClient } from "./eva-client";
+import { configuredRuntime, EvaClient, saveCloudConfiguration, type EvaRuntime } from "./eva-client";
 import evaLogo from "./assets/eva-app-icon.png";
 
 export function App() {
@@ -45,11 +49,14 @@ export function App() {
   const [draft, setDraft] = useState("");
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState(false);
-  const [agentMode, setAgentMode] = useState<"pi" | "fake">("pi");
+  const [agentMode, setAgentMode] = useState<"pi" | "fake" | "cloud">("pi");
   const [error, setError] = useState<string>();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<AgentSettings>();
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [runtime] = useState<EvaRuntime>(() => configuredRuntime());
+  const [authenticationRequired, setAuthenticationRequired] = useState(() => configuredRuntime() === "cloud" && !localStorage.getItem("eva-cloud-token") && location.hostname.endsWith(".workers.dev"));
   const [theme, setTheme] = useState<"light" | "dark">(() => localStorage.getItem("eva-theme") === "light" ? "light" : "dark");
   const [showToolCalls, setShowToolCalls] = useState(() => localStorage.getItem("eva-show-tool-calls") !== "false");
 
@@ -59,12 +66,14 @@ export function App() {
     clientRef.current = client;
     const removeEvent = client.onEvent((event) => handleEvent(event, client));
     const removeConnection = client.onConnection(setConnected);
+    const removeAuthentication = client.onAuthenticationRequired(() => setAuthenticationRequired(true));
     const removeServerError = window.eva?.onServerError(setError);
     const removeTrayNewChat = window.eva?.onNewChat(() => client.send(command("chat.create", {})));
     void client.connect().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not connect"));
     return () => {
       removeEvent();
       removeConnection();
+      removeAuthentication();
       removeServerError?.();
       removeTrayNewChat?.();
       client.close();
@@ -148,6 +157,15 @@ export function App() {
       case "settings.updated":
         setSettings(event.payload.settings);
         break;
+      case "memory.snapshot":
+        setMemories(event.payload.memories);
+        break;
+      case "memory.updated":
+        setMemories((current) => [event.payload.memory, ...current.filter((memory) => memory.id !== event.payload.memory.id)]);
+        break;
+      case "memory.deleted":
+        setMemories((current) => current.filter((memory) => memory.id !== event.payload.memoryId));
+        break;
       case "server.error":
         setError(event.payload.message);
         break;
@@ -187,6 +205,14 @@ export function App() {
 
   return (
     <div className="app-shell">
+      {authenticationRequired && (
+        <CloudLogin
+          onConnect={(endpoint, token) => {
+            saveCloudConfiguration(endpoint, token);
+            location.reload();
+          }}
+        />
+      )}
       <header className="floating-header">
         <div className="window-controls" aria-label="Window controls">
           <button onClick={() => window.eva?.windowAction("close")} aria-label="Close"><Circle weight="fill" /></button>
@@ -231,7 +257,14 @@ export function App() {
               <div className="timeline-group" key={message.id}>
                 {message.role === "assistant" && showToolCalls && activeChat.toolCalls
                   .filter((toolCall) => toolCall.assistantMessageId === message.id)
-                  .map((toolCall) => <ToolCallRow key={toolCall.id} toolCall={toolCall} />)}
+                  .map((toolCall) => (
+                    <ToolCallRow
+                      key={toolCall.id}
+                      toolCall={toolCall}
+                      onApprove={() => clientRef.current?.send(command("tool.approve", { toolCallId: toolCall.id }))}
+                      onReject={() => clientRef.current?.send(command("tool.reject", { toolCallId: toolCall.id }))}
+                    />
+                  ))}
                 <Message message={message} />
               </div>
             ))}
@@ -246,6 +279,21 @@ export function App() {
                 onThemeChange={setTheme}
                 showToolCalls={showToolCalls}
                 onShowToolCallsChange={setShowToolCalls}
+                memories={memories}
+                runtime={runtime}
+                onRuntimeChange={(nextRuntime) => {
+                  localStorage.setItem("eva-runtime", nextRuntime);
+                  location.reload();
+                }}
+                onMemoryCreate={(kind, content) => clientRef.current?.send(command("memory.create", { kind, content, importance: 5 }))}
+                onMemoryUpdate={(memory) => clientRef.current?.send(command("memory.update", {
+                  memoryId: memory.id,
+                  kind: memory.kind,
+                  content: memory.content,
+                  importance: memory.importance,
+                  status: memory.status,
+                }))}
+                onMemoryDelete={(memoryId) => clientRef.current?.send(command("memory.delete", { memoryId }))}
                 onClose={() => setSettingsOpen(false)}
                 onApply={(next) => {
                   clientRef.current?.send(command("settings.update", {
@@ -291,13 +339,36 @@ export function App() {
                 aria-label="Choose model and assistant settings"
               >
                 <img className="eva-model-icon" src={evaLogo} alt="" />
-                <span>{settings ? selectedModelName(settings) : connected ? `${agentMode === "fake" ? "Demo" : "Pi"} ready` : "Connecting…"}</span>
+                <span>{settings ? selectedModelName(settings) : connected ? `${agentMode === "fake" ? "Demo" : agentMode === "cloud" ? "Cloud" : "Pi"} ready` : "Connecting…"}</span>
                 <CaretDown weight="bold" />
               </button>
-              <span>{window.eva?.platform === "darwin" ? "⌘⇧Space" : "Ctrl+Shift+Space"} to hide</span>
+              <span>{window.eva ? `${window.eva.platform === "darwin" ? "⌘⇧Space" : "Ctrl+Shift+Space"} to hide` : agentMode === "cloud" ? "Private cloud session" : "Browser preview"}</span>
             </div>
           </div>
       </main>
+    </div>
+  );
+}
+
+function CloudLogin({ onConnect }: { onConnect: (endpoint: string, token: string) => void }) {
+  const [endpoint, setEndpoint] = useState(() => localStorage.getItem("eva-cloud-endpoint") || location.origin);
+  const [token, setToken] = useState("");
+  return (
+    <div className="cloud-login-backdrop">
+      <form
+        className="cloud-login"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (endpoint.trim() && token.trim()) onConnect(endpoint, token);
+        }}
+      >
+        <img src={evaLogo} alt="" />
+        <h1>Connect to Eva Cloud</h1>
+        <p>Enter the private access token created during deployment. It stays on this device.</p>
+        <label><span>Cloud endpoint</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} type="url" required /></label>
+        <label><span>Access token</span><input value={token} onChange={(event) => setToken(event.target.value)} type="password" autoComplete="current-password" required autoFocus /></label>
+        <button type="submit" disabled={!endpoint.trim() || !token.trim()}><Cloud weight="fill" /> Connect securely</button>
+      </form>
     </div>
   );
 }
@@ -309,6 +380,12 @@ function SettingsPopover({
   onThemeChange,
   showToolCalls,
   onShowToolCallsChange,
+  memories,
+  runtime,
+  onRuntimeChange,
+  onMemoryCreate,
+  onMemoryUpdate,
+  onMemoryDelete,
   onClose,
   onApply,
 }: {
@@ -318,10 +395,18 @@ function SettingsPopover({
   onThemeChange: (theme: "light" | "dark") => void;
   showToolCalls: boolean;
   onShowToolCallsChange: (show: boolean) => void;
+  memories: Memory[];
+  runtime: EvaRuntime;
+  onRuntimeChange: (runtime: EvaRuntime) => void;
+  onMemoryCreate: (kind: MemoryKind, content: string) => void;
+  onMemoryUpdate: (memory: Memory) => void;
+  onMemoryDelete: (memoryId: string) => void;
   onClose: () => void;
   onApply: (settings: AgentSettings) => void;
 }) {
   const [draft, setDraft] = useState(settings);
+  const [memoryDraft, setMemoryDraft] = useState("");
+  const [memoryKind, setMemoryKind] = useState<MemoryKind>("preference");
   const panelRef = useRef<HTMLDivElement>(null);
   const providers = useMemo(() => {
     const grouped = new Map<string, AgentSettings["models"]>();
@@ -428,6 +513,61 @@ function SettingsPopover({
         <small>Shows commands, fetched URLs, output, and completion status in the conversation.</small>
       </div>
 
+      <div className="appearance-field">
+        <span>Runtime</span>
+        <div className="theme-switch" role="group" aria-label="Eva runtime">
+          <button type="button" className={runtime === "local" ? "active" : ""} onClick={() => onRuntimeChange("local")} aria-pressed={runtime === "local"}>
+            <TerminalWindow weight="bold" /> This device
+          </button>
+          <button type="button" className={runtime === "cloud" ? "active" : ""} onClick={() => onRuntimeChange("cloud")} aria-pressed={runtime === "cloud"}>
+            <Cloud weight="fill" /> Eva Cloud
+          </button>
+        </div>
+        <small>Cloud mode syncs chats and memory and runs commands in an isolated Cloudflare workspace.</small>
+      </div>
+
+      {runtime === "cloud" && (
+        <div className="memory-settings">
+          <div className="memory-heading"><span>Online Memory</span><strong>{memories.filter((memory) => memory.status === "active").length}</strong></div>
+          <div className="memory-create">
+            <select value={memoryKind} onChange={(event) => setMemoryKind(event.target.value as MemoryKind)} aria-label="Memory type">
+              <option value="preference">Preference</option>
+              <option value="profile">Profile</option>
+              <option value="project">Project</option>
+              <option value="instruction">Instruction</option>
+              <option value="fact">Fact</option>
+            </select>
+            <input value={memoryDraft} onChange={(event) => setMemoryDraft(event.target.value)} placeholder="Something Eva should remember…" maxLength={2000} />
+            <button
+              type="button"
+              disabled={!memoryDraft.trim()}
+              onClick={() => {
+                onMemoryCreate(memoryKind, memoryDraft.trim());
+                setMemoryDraft("");
+              }}
+              aria-label="Add memory"
+            ><Plus weight="bold" /></button>
+          </div>
+          <div className="memory-list">
+            {memories.length ? memories.slice(0, 30).map((memory) => (
+              <div className={`memory-item ${memory.status}`} key={memory.id}>
+                <button
+                  type="button"
+                  className="memory-content"
+                  onClick={() => onMemoryUpdate({ ...memory, status: memory.status === "active" ? "archived" : "active" })}
+                  title={memory.status === "active" ? "Archive memory" : "Restore memory"}
+                >
+                  <span>{memory.kind}</span>
+                  <p>{memory.content}</p>
+                </button>
+                <button type="button" className="memory-delete" onClick={() => onMemoryDelete(memory.id)} aria-label={`Delete memory: ${memory.content}`}><Trash weight="bold" /></button>
+              </div>
+            )) : <p className="memory-empty">Eva has no long-term memories yet.</p>}
+          </div>
+          <small>Click a memory to archive or restore it. Deleted memories are removed from semantic retrieval.</small>
+        </div>
+      )}
+
       <div className="settings-footer">
         <span>Model changes apply to the next message</span>
         <button type="button" onClick={() => onApply(draft)} disabled={!changed || disabled}>Apply</button>
@@ -436,11 +576,11 @@ function SettingsPopover({
   );
 }
 
-function ToolCallRow({ toolCall }: { toolCall: ToolCall }) {
+function ToolCallRow({ toolCall, onApprove, onReject }: { toolCall: ToolCall; onApprove: () => void; onReject: () => void }) {
   const preview = toolCallPreview(toolCall);
   const isWeb = toolCall.name === "web_fetch";
   const Icon = isWeb ? GlobeHemisphereWest : TerminalWindow;
-  const StatusIcon = toolCall.status === "error" ? WarningCircle : toolCall.status === "complete" ? CheckCircle : Circle;
+  const StatusIcon = toolCall.status === "error" || toolCall.status === "rejected" ? WarningCircle : toolCall.status === "complete" ? CheckCircle : Circle;
   return (
     <details className={`tool-call ${toolCall.status}`}>
       <summary>
@@ -455,6 +595,13 @@ function ToolCallRow({ toolCall }: { toolCall: ToolCall }) {
       <div className="tool-call-details">
         <div><span>Input</span><pre>{JSON.stringify(toolCall.input, null, 2)}</pre></div>
         <div><span>Output</span><pre>{toolCall.output || (toolCall.status === "running" ? "Waiting for output…" : "No output")}</pre></div>
+        {toolCall.status === "pending" && (
+          <div className="tool-approval">
+            <p>This command will run inside Eva’s isolated cloud workspace.</p>
+            <button type="button" className="reject" onClick={onReject}>Reject</button>
+            <button type="button" className="approve" onClick={onApprove}>Run command</button>
+          </div>
+        )}
       </div>
     </details>
   );
@@ -464,7 +611,7 @@ function EmptyState() {
   return (
     <div className="empty-state">
       <h2>Ask Anything</h2>
-      <p>Your local Pi assistant, one shortcut away.</p>
+      <p>Your personal assistant, available wherever you are.</p>
       <div className="suggestions">
         <button className="suggestion-icon brain" onClick={() => focusWithText("Help me think through an idea")} aria-label="Think through an idea"><Brain weight="fill" /></button>
         <button className="suggestion-icon calendar" onClick={() => focusWithText("Help me plan my day")} aria-label="Plan my day"><CalendarBlank weight="fill" /></button>
@@ -504,6 +651,8 @@ function toolCallLabel(toolCall: ToolCall): string {
 function formatToolStatus(status: ToolCall["status"]): string {
   if (status === "complete") return "Done";
   if (status === "error") return "Failed";
+  if (status === "pending") return "Approval needed";
+  if (status === "rejected") return "Rejected";
   return "Running";
 }
 

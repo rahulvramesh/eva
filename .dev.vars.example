@@ -1,0 +1,7 @@
+# Copy this file to .dev.vars and replace the value with a long random token.
+EVA_API_TOKEN=replace-with-a-long-random-token
+EVA_LOCAL_DEV=true
+
+# Optional Cloudflare Access validation for a custom domain.
+ACCESS_TEAM_DOMAIN=
+ACCESS_AUD=

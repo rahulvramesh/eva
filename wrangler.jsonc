@@ -1,0 +1,68 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "eva-cloud",
+  "main": "apps/cloud/src/index.ts",
+  "compatibility_date": "2026-08-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": true,
+  "vars": {
+    "EVA_AUTH_MODE": "access-or-token",
+    "SANDBOX_TRANSPORT": "rpc",
+    "EVA_CLOUD_MODEL": "@cf/moonshotai/kimi-k2.6",
+    "EVA_EMBEDDING_MODEL": "@cf/baai/bge-base-en-v1.5",
+    "EVA_DEFAULT_SYSTEM_INSTRUCTIONS": "You are Eva, Rahul's concise and capable personal assistant. Use relevant long-term memories when helpful. Use web_fetch for current public information. Use bash only when execution is necessary, and explain destructive or sensitive actions before requesting approval. Use remember only for durable user preferences, profile facts, project context, or explicit instructions. Never memorize credentials, tokens, passwords, private keys, or transient details."
+  },
+  "assets": {
+    "directory": "./out/web",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "ai": { "binding": "AI", "remote": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "eva-cloud-production",
+      "database_id": "91ee2e53-5084-4286-9fa9-7e4fd7f12232",
+      "migrations_dir": "./migrations/d1"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "WORKSPACES", "bucket_name": "eva-workspaces-production" }
+  ],
+  "vectorize": [
+    { "binding": "MEMORY_INDEX", "index_name": "eva-memory-production", "remote": true }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "MEMORY_QUEUE", "queue": "eva-memory-production" }
+    ],
+    "consumers": [
+      { "queue": "eva-memory-production", "max_batch_size": 10, "max_batch_timeout": 5 }
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "EVA_AGENT", "class_name": "EvaAgent" },
+      { "name": "Sandbox", "class_name": "Sandbox" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["EvaAgent", "Sandbox"] }
+  ],
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./apps/cloud/Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 3
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": { "enabled": true, "invocation_logs": true, "head_sampling_rate": 1 }
+  },
+  "limits": { "cpu_ms": 30000 }
+}

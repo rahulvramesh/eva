@@ -294,7 +294,9 @@ button { color: inherit; }
   left: 22px;
   bottom: 81px;
   width: min(360px, calc(100% - 44px));
-  overflow: hidden;
+  max-height: calc(100vh - 105px);
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid #3f4140;
   border-radius: 18px;
   padding: 14px 15px 13px;
@@ -366,6 +368,49 @@ button { color: inherit; }
 .settings-footer { display: flex; align-items: center; justify-content: space-between; margin: 2px -15px -13px; border-top: 1px solid #343634; padding: 11px 15px; color: #686b68; font-size: 8.5px; }
 .settings-footer button { min-width: 67px; height: 30px; border: 0; border-radius: 9px; color: #191a19; background: #e6e7e4; font-size: 10px; font-weight: 720; cursor: pointer; }
 .settings-footer button:disabled { color: #696b69; background: #303230; cursor: default; }
+
+.memory-settings { margin: 1px 0 13px; color: #969896; font-size: 10px; }
+.memory-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; font-weight: 680; }
+.memory-heading strong { display: grid; place-items: center; min-width: 19px; height: 19px; border-radius: 999px; color: #cdd0cd; background: #323533; font-size: 9px; }
+.memory-create { display: grid; grid-template-columns: 83px minmax(0, 1fr) 30px; gap: 5px; }
+.memory-create select,
+.memory-create input { min-width: 0; height: 32px; border: 1px solid #444745; border-radius: 8px; outline: 0; padding: 0 8px; color: #dedfdd; background: #181918; font-size: 9px; }
+.memory-create button { display: grid; place-items: center; border: 0; border-radius: 8px; color: #151715; background: #dfe2df; cursor: pointer; }
+.memory-create button:disabled { opacity: .35; cursor: default; }
+.memory-create svg { width: 12px; height: 12px; }
+.memory-list { max-height: 150px; overflow-y: auto; margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.memory-item { display: grid; grid-template-columns: minmax(0, 1fr) 28px; align-items: center; border: 1px solid #353836; border-radius: 9px; background: #1d1f1e; }
+.memory-item.archived { opacity: .48; }
+.memory-content { min-width: 0; border: 0; padding: 7px 8px; text-align: left; background: transparent; cursor: pointer; }
+.memory-content span { color: #777d79; font-size: 7px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.memory-content p { margin: 2px 0 0; overflow: hidden; color: #cdd0cd; font-size: 9px; line-height: 1.3; text-overflow: ellipsis; }
+.memory-delete { display: grid; place-items: center; width: 25px; height: 25px; border: 0; border-radius: 7px; color: #747a76; background: transparent; cursor: pointer; }
+.memory-delete:hover { color: #ef938e; background: #38211f; }
+.memory-delete svg { width: 11px; height: 11px; }
+.memory-empty { margin: 9px 0; color: #696d6a; text-align: center; font-size: 9px; }
+.memory-settings > small { display: block; margin-top: 6px; color: #626562; font-size: 8.5px; line-height: 1.35; }
+
+.tool-approval { display: grid !important; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 7px; margin-top: 8px; }
+.tool-approval p { margin: 0; color: #a4aaa6; font-size: 9px; line-height: 1.35; }
+.tool-approval button { height: 28px; border: 1px solid #474b48; border-radius: 8px; padding: 0 9px; font-size: 9px; font-weight: 700; cursor: pointer; }
+.tool-approval .reject { color: #b7bcb8; background: #252826; }
+.tool-approval .approve { border-color: #daddda; color: #151715; background: #e4e7e4; }
+
+.cloud-login-backdrop { position: absolute; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(8, 10, 9, .88); backdrop-filter: blur(18px); }
+.cloud-login { width: min(355px, 100%); border: 1px solid #424643; border-radius: 20px; padding: 25px; color: #f0f2ef; background: #161918; box-shadow: 0 30px 90px rgba(0, 0, 0, .52); }
+.cloud-login > img { width: 46px; height: 46px; border-radius: 13px; box-shadow: 0 9px 24px rgba(0, 0, 0, .35); }
+.cloud-login h1 { margin: 15px 0 5px; font-size: 19px; letter-spacing: -.02em; }
+.cloud-login > p { margin: 0 0 18px; color: #929893; font-size: 10px; line-height: 1.5; }
+.cloud-login label { display: block; margin-top: 10px; }
+.cloud-login label span { display: block; margin-bottom: 6px; color: #9ca19d; font-size: 9px; font-weight: 680; }
+.cloud-login input { width: 100%; height: 39px; border: 1px solid #484c49; border-radius: 10px; outline: 0; padding: 0 11px; color: #edf0ed; background: #1e211f; font-size: 11px; }
+.cloud-login input:focus { border-color: #aeb3af; box-shadow: 0 0 0 3px rgba(255, 255, 255, .045); }
+.cloud-login > button { width: 100%; height: 40px; display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 16px; border: 0; border-radius: 10px; color: #161816; background: #e6e9e6; font-size: 10px; font-weight: 750; cursor: pointer; }
+.cloud-login > button:disabled { opacity: .4; cursor: default; }
+.cloud-login > button svg { width: 14px; height: 14px; }
+
+:root[data-platform="web"] .window-controls { display: none; }
+:root[data-platform="web"] .sidebar-toggle { left: 16px; }
 
 .error-banner { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 8px; padding: 8px 10px; border: 1px solid #683b39; border-radius: 10px; color: #e8a29e; background: #2b1b1a; font-size: 10px; }
 .error-banner button { border: 0; background: transparent; color: inherit; font-size: 9px; text-decoration: underline; cursor: pointer; }
@@ -454,6 +499,11 @@ button { color: inherit; }
 :root[data-theme="light"] .settings-footer { border-color: rgba(55, 64, 58, .16); }
 :root[data-theme="light"] .settings-footer button { color: #f7f8f6; background: #363c38; }
 :root[data-theme="light"] .settings-footer button:disabled { color: #979d99; background: rgba(59, 67, 62, .10); }
+:root[data-theme="light"] .memory-create select,
+:root[data-theme="light"] .memory-create input,
+:root[data-theme="light"] .memory-item { border-color: rgba(55, 64, 58, .22); color: #292e2b; background: rgba(255, 255, 255, .48); }
+:root[data-theme="light"] .memory-content p { color: #353b37; }
+:root[data-theme="light"] .memory-heading strong { color: #424945; background: rgba(48, 57, 51, .10); }
 :root[data-theme="light"] .chat-drawer { border-color: rgba(58, 66, 61, .24); background: rgba(245, 248, 245, .92); box-shadow: 0 18px 46px rgba(38, 46, 41, .22); }
 :root[data-theme="light"] .drawer-heading { color: #555c58; }
 :root[data-theme="light"] .drawer-heading button { color: #444a46; background: rgba(49, 57, 52, .08); }

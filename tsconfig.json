@@ -12,5 +12,6 @@
     "resolveJsonModule": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["apps/**/*.ts", "apps/**/*.tsx", "packages/**/*.ts", "*.ts"]
+  "include": ["apps/agent-server/**/*.ts", "apps/desktop/**/*.ts", "apps/desktop/**/*.tsx", "packages/**/*.ts", "*.ts"],
+  "exclude": ["apps/cloud"]
 }

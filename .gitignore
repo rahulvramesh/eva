@@ -4,6 +4,9 @@ dist/
 release/
 .eva-dev/
 .eva-data/
+.wrangler/
+.dev.vars
+.eva-cloud-token
 build/Eva.iconset/
 *.log
 .DS_Store
