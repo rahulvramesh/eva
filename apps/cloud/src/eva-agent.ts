@@ -6,7 +6,9 @@ import {
   type AgentSettings,
   type ChatMessage,
   type ClientCommand,
+  type DeviceCapability,
   type MemoryKind,
+  type RoutingPolicy,
   type ServerEvent,
   type ServerEventType,
   type ToolCall,
@@ -21,6 +23,7 @@ import {
   ensureUser,
   getChat,
   getSettings,
+  importTurn,
   listChats,
   listMemories,
   saveApproval,
@@ -29,13 +32,24 @@ import {
   updateMessage,
   updateSettings,
   updateToolCall,
+  upsertToolCall,
   type ModelMessage,
 } from "./db";
 import { enqueueMemory, enqueueMemoryDelete, retrieveMemories } from "./memory";
 import { runBash, runWebFetch } from "./tools";
+import { isPrivateCapableModel, shouldRouteToDevice } from "./routing";
 
-type SocketAttachment = { userId: string; identity: string };
+type SocketAttachment = { userId: string; identity: string; device?: DeviceCapability };
 type ModelToolCall = { id: string; name: string; input: Record<string, unknown> };
+type PendingDeviceTurn = {
+  turnId: string;
+  userId: string;
+  chatId: string;
+  assistantMessageId: string;
+  deviceId: string;
+  private: boolean;
+};
+type PreferredDeviceModel = { deviceId: string; provider: string; modelId: string; thinkingLevel: AgentSettings["thinkingLevel"]; systemInstructions: string };
 
 const bashInputSchema = z.object({ command: z.string().trim().min(1).max(20_000) });
 const webFetchInputSchema = z.object({ url: z.string().trim().min(1).max(8_000) });
@@ -97,9 +111,10 @@ export class EvaAgent extends DurableObject<Env> {
     const server = pair[1];
     server.serializeAttachment({ userId, identity } satisfies SocketAttachment);
     this.ctx.acceptWebSocket(server, [userId]);
-    this.send(server, "server.hello", { protocolVersion: PROTOCOL_VERSION, agentMode: "cloud" });
+    this.send(server, "server.hello", { protocolVersion: PROTOCOL_VERSION, agentMode: "hybrid" });
+    this.send(server, "device.presence", { devices: this.connectedDevices() });
     const protocols = request.headers.get("sec-websocket-protocol")?.split(",").map((value) => value.trim()) ?? [];
-    const headers = protocols.includes("eva-v1") ? { "sec-websocket-protocol": "eva-v1" } : undefined;
+    const headers = protocols.includes("eva-v2") ? { "sec-websocket-protocol": "eva-v2" } : undefined;
     return new Response(null, { status: 101, webSocket: client, headers });
   }
 
@@ -131,6 +146,18 @@ export class EvaAgent extends DurableObject<Env> {
     console.error(JSON.stringify({ event: "eva.websocket.error", userId: attachment?.userId.slice(0, 12), error: errorMessage(error) }));
   }
 
+  async webSocketClose(socket: WebSocket): Promise<void> {
+    const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+    const activeTurnId = await this.ctx.storage.get<string>("active-device-turn");
+    if (attachment?.device && activeTurnId) {
+      const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${activeTurnId}`);
+      if (pending?.deviceId === attachment.device.id) {
+        await this.failDeviceTurn(pending, "The selected Eva desktop disconnected during the turn.");
+      }
+    }
+    this.broadcast("device.presence", { devices: this.connectedDevices() });
+  }
+
   private async dispatch(socket: WebSocket, userId: string, command: ClientCommand): Promise<void> {
     switch (command.type) {
       case "chat.list":
@@ -145,10 +172,24 @@ export class EvaAgent extends DurableObject<Env> {
         this.send(socket, "chat.snapshot", { chat: await getChat(this.env.DB, userId, command.chatId) });
         return;
       case "settings.get":
-        this.send(socket, "settings.snapshot", { settings: await getSettings(this.env.DB, this.env, userId) });
+        this.send(socket, "settings.snapshot", { settings: await this.hybridSettings(userId) });
         return;
       case "settings.update": {
-        if (this.running) throw new Error("Stop the current response before changing model settings.");
+        if (this.running || await this.ctx.storage.get("active-device-turn")) throw new Error("Stop the current response before changing model settings.");
+        const deviceModel = this.findDeviceModel(command.provider, command.modelId);
+        if (deviceModel) {
+          const preferred: PreferredDeviceModel = {
+            deviceId: deviceModel.device.id,
+            provider: command.provider,
+            modelId: command.modelId,
+            thinkingLevel: command.thinkingLevel,
+            systemInstructions: command.systemInstructions,
+          };
+          await this.ctx.storage.put("preferred-device-model", preferred);
+          this.broadcast("device.settings.update", preferred);
+          this.broadcast("settings.updated", { settings: await this.hybridSettings(userId) });
+          return;
+        }
         const current = await getSettings(this.env.DB, this.env, userId);
         const settings = await updateSettings(this.env.DB, this.env, userId, {
           ...current,
@@ -156,7 +197,8 @@ export class EvaAgent extends DurableObject<Env> {
           thinkingLevel: command.thinkingLevel,
           systemInstructions: command.systemInstructions,
         });
-        this.broadcast("settings.updated", { settings });
+        await this.ctx.storage.delete("preferred-device-model");
+        this.broadcast("settings.updated", { settings: { ...settings, models: this.hybridModels(settings.models) } });
         return;
       }
       case "memory.list":
@@ -190,6 +232,7 @@ export class EvaAgent extends DurableObject<Env> {
         return;
       case "run.abort":
         this.abortRequested = true;
+        await this.abortDeviceTurn(command.chatId);
         return;
       case "tool.approve":
         await this.approveTool(userId, command.toolCallId);
@@ -198,30 +241,286 @@ export class EvaAgent extends DurableObject<Env> {
         await this.rejectTool(userId, command.toolCallId);
         return;
       case "message.send":
-        if (this.running) throw new Error("Wait for the current response or stop it first.");
-        this.ctx.waitUntil(this.runPrompt(userId, command.chatId, command.content));
+        if (this.running || await this.ctx.storage.get("active-device-turn")) throw new Error("Wait for the current response or stop it first.");
+        this.running = true;
+        this.ctx.waitUntil(this.routePrompt(userId, command.chatId, command.content, command.routing ?? "auto").catch((error) => {
+          this.running = false;
+          this.broadcast("server.error", { code: "ROUTING_ERROR", message: errorMessage(error) });
+        }));
         return;
+      case "device.register": {
+        const attachment = socket.deserializeAttachment() as SocketAttachment;
+        const device = { ...command.device, connectedAt: new Date().toISOString() };
+        socket.serializeAttachment({ ...attachment, device } satisfies SocketAttachment);
+        this.broadcast("device.presence", { devices: this.connectedDevices() });
+        this.broadcast("settings.updated", { settings: await this.hybridSettings(userId) });
+        return;
+      }
+      case "device.turn.delta":
+        await this.acceptDeviceDelta(socket, command.turnId, command.delta);
+        return;
+      case "device.turn.tool":
+        await this.acceptDeviceTool(socket, command.turnId, command.toolCall);
+        return;
+      case "device.turn.complete":
+        await this.acceptDeviceCompletion(socket, command.turnId, command.content, command.status);
+        return;
+      case "sync.turn.push":
+        await importTurn(this.env.DB, userId, command);
+        this.send(socket, "sync.turn.ack", { chatId: command.chatId, assistantMessageId: command.assistantMessage.id });
+        this.broadcast("chat.snapshot", { chat: await getChat(this.env.DB, userId, command.chatId) });
+        this.broadcast("chat.list", { chats: await listChats(this.env.DB, userId) });
+        return;
+      case "device.turn.execute":
+        throw new Error("Device execution commands are accepted only by Eva Desktop.");
+      case "device.turn.abort":
+        throw new Error("Device abort commands are sent by Eva Cloud, not accepted from clients.");
     }
+  }
+
+  private async routePrompt(userId: string, chatId: string, content: string, routing: RoutingPolicy): Promise<void> {
+    const preferred = await this.ctx.storage.get<PreferredDeviceModel>("preferred-device-model");
+    const requestedDevice = preferred ? this.connectedDevices().find((device) => device.id === preferred.deviceId) : undefined;
+    const device = requestedDevice ?? this.connectedDevices()[0];
+    const effectivePreferred = requestedDevice ? preferred : undefined;
+    const useDevice = shouldRouteToDevice(routing, content, Boolean(device), Boolean(effectivePreferred));
+    if (useDevice && device) {
+      if (routing === "private") {
+        const model = effectivePreferred
+          ? device.models.find((candidate) => candidate.provider === effectivePreferred?.provider && candidate.id === effectivePreferred.modelId)
+          : device.models.find((candidate) => candidate.available !== false);
+        if (!isPrivateCapableModel(model)) throw new Error("Private mode requires an on-device model such as Ollama. The selected Pi model uses a remote provider.");
+      }
+      await this.runDevicePrompt(userId, chatId, content, routing, device, effectivePreferred);
+      return;
+    }
+    if ((routing === "device" || routing === "private") && !device) throw new Error("Your Eva desktop device is offline.");
+    await this.runPrompt(userId, chatId, content);
+  }
+
+  private async runDevicePrompt(
+    userId: string,
+    chatId: string,
+    content: string,
+    routing: RoutingPolicy,
+    device: DeviceCapability,
+    preferred?: PreferredDeviceModel,
+  ): Promise<void> {
+    this.running = true;
+    this.abortRequested = false;
+    const turnId = crypto.randomUUID();
+    try {
+      const model = preferred ? `${preferred.provider}/${preferred.modelId}` : selectedDeviceModel(device);
+      const provenance = { executionHost: "device" as const, deviceId: device.id, model, private: routing === "private" };
+      const userMessage = await appendMessage(this.env.DB, userId, chatId, "user", content, "complete", provenance);
+      this.broadcast("message.append", { chatId, message: userMessage });
+      const assistant = await appendMessage(this.env.DB, userId, chatId, "assistant", "", "streaming", provenance);
+      this.broadcast("message.append", { chatId, message: assistant });
+      const pending: PendingDeviceTurn = {
+        turnId,
+        userId,
+        chatId,
+        assistantMessageId: assistant.id,
+        deviceId: device.id,
+        private: routing === "private",
+      };
+      await this.ctx.storage.put(`device-turn:${turnId}`, pending);
+      await this.ctx.storage.put("active-device-turn", turnId);
+      await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
+      this.broadcast("run.status", { chatId, status: "running" });
+      this.broadcast("route.status", {
+        chatId,
+        turnId,
+        host: "device",
+        deviceId: device.id,
+        model,
+        private: routing === "private",
+        status: "running",
+      });
+      const chat = await getChat(this.env.DB, userId, chatId);
+      let delivered = false;
+      for (const candidate of this.ctx.getWebSockets()) {
+        const attachment = candidate.deserializeAttachment() as SocketAttachment | null;
+        if (attachment?.device?.id !== device.id) continue;
+        this.send(candidate, "device.turn.request", { turnId, chat, content, routing });
+        delivered = true;
+      }
+      if (!delivered) throw new Error("The selected Eva desktop disconnected before the turn started.");
+    } catch (error) {
+      const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${turnId}`);
+      if (pending) await this.failDeviceTurn(pending, errorMessage(error));
+      else {
+        this.running = false;
+        await this.ctx.storage.delete([`device-turn:${turnId}`, "active-device-turn"]);
+        this.broadcast("route.status", { chatId, turnId, host: "device", deviceId: device.id, private: routing === "private", status: "error" });
+      }
+      throw error;
+    }
+  }
+
+  private async acceptDeviceDelta(socket: WebSocket, turnId: string, delta: string): Promise<void> {
+    const pending = await this.authorizeDeviceTurn(socket, turnId);
+    this.broadcast("assistant.delta", { chatId: pending.chatId, messageId: pending.assistantMessageId, delta });
+    this.broadcast("device.turn.delta", { turnId, chatId: pending.chatId, messageId: pending.assistantMessageId, delta });
+  }
+
+  private async acceptDeviceTool(socket: WebSocket, turnId: string, toolCall: ToolCall): Promise<void> {
+    const pending = await this.authorizeDeviceTurn(socket, turnId);
+    if (toolCall.assistantMessageId !== pending.assistantMessageId) throw new Error("The device tool call targeted the wrong message.");
+    await upsertToolCall(this.env.DB, pending.userId, pending.chatId, toolCall);
+    this.broadcast("device.turn.tool", { turnId, chatId: pending.chatId, toolCall });
+    if (toolCall.status === "running") this.broadcast("tool.call", { chatId: pending.chatId, toolCall });
+    else this.broadcast("tool.update", { chatId: pending.chatId, toolCall });
+  }
+
+  private async acceptDeviceCompletion(
+    socket: WebSocket,
+    turnId: string,
+    content: string,
+    status: "complete" | "aborted" | "error",
+  ): Promise<void> {
+    const pending = await this.authorizeDeviceTurn(socket, turnId);
+    await updateMessage(this.env.DB, pending.userId, pending.chatId, pending.assistantMessageId, { content, status });
+    await this.ctx.storage.delete([`device-turn:${turnId}`, "active-device-turn"]);
+    await this.ctx.storage.deleteAlarm();
+    this.running = false;
+    this.broadcast("device.turn.complete", {
+      turnId,
+      chatId: pending.chatId,
+      messageId: pending.assistantMessageId,
+      content,
+      status,
+    });
+    this.broadcast("run.status", { chatId: pending.chatId, status: status === "complete" ? "idle" : status });
+    this.broadcast("route.status", {
+      chatId: pending.chatId,
+      turnId,
+      host: "device",
+      deviceId: pending.deviceId,
+      private: pending.private,
+      status: status === "complete" ? "complete" : "error",
+    });
+    this.broadcast("chat.list", { chats: await listChats(this.env.DB, pending.userId) });
+  }
+
+  private async authorizeDeviceTurn(socket: WebSocket, turnId: string): Promise<PendingDeviceTurn> {
+    const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+    const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${turnId}`);
+    if (!attachment?.device || !pending || attachment.userId !== pending.userId || attachment.device.id !== pending.deviceId) {
+      throw new Error("This device is not authorized for that turn.");
+    }
+    return pending;
+  }
+
+  private async abortDeviceTurn(chatId: string): Promise<void> {
+    const turnId = await this.ctx.storage.get<string>("active-device-turn");
+    if (!turnId) return;
+    const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${turnId}`);
+    if (!pending || pending.chatId !== chatId) return;
+    for (const candidate of this.ctx.getWebSockets()) {
+      const attachment = candidate.deserializeAttachment() as SocketAttachment | null;
+      if (attachment?.device?.id === pending.deviceId) this.send(candidate, "device.turn.abort", { turnId, chatId });
+    }
+  }
+
+  private async failDeviceTurn(pending: PendingDeviceTurn, message: string): Promise<void> {
+    await updateMessage(this.env.DB, pending.userId, pending.chatId, pending.assistantMessageId, { content: message, status: "error" });
+    await this.ctx.storage.delete([`device-turn:${pending.turnId}`, "active-device-turn"]);
+    await this.ctx.storage.deleteAlarm();
+    this.running = false;
+    this.broadcast("device.turn.complete", {
+      turnId: pending.turnId,
+      chatId: pending.chatId,
+      messageId: pending.assistantMessageId,
+      content: message,
+      status: "error",
+    });
+    this.broadcast("run.status", { chatId: pending.chatId, status: "error" });
+    this.broadcast("route.status", {
+      chatId: pending.chatId,
+      turnId: pending.turnId,
+      host: "device",
+      deviceId: pending.deviceId,
+      private: pending.private,
+      status: "error",
+    });
+    this.broadcast("chat.list", { chats: await listChats(this.env.DB, pending.userId) });
+  }
+
+  async alarm(): Promise<void> {
+    const turnId = await this.ctx.storage.get<string>("active-device-turn");
+    if (!turnId) return;
+    const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${turnId}`);
+    if (pending) await this.failDeviceTurn(pending, "The device turn timed out after five minutes.");
+  }
+
+  private connectedDevices(): DeviceCapability[] {
+    const devices = new Map<string, DeviceCapability>();
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment = socket.deserializeAttachment() as SocketAttachment | null;
+      if (attachment?.device) devices.set(attachment.device.id, { ...attachment.device, online: true });
+    }
+    return [...devices.values()];
+  }
+
+  private findDeviceModel(provider: string, modelId: string): { device: DeviceCapability; model: AgentSettings["models"][number] } | undefined {
+    for (const device of this.connectedDevices()) {
+      const model = device.models.find((candidate) => candidate.provider === provider && candidate.id === modelId);
+      if (model) return { device, model };
+    }
+    return undefined;
+  }
+
+  private hybridModels(cloudModels: AgentSettings["models"]): AgentSettings["models"] {
+    return [
+      ...cloudModels.map((model) => ({ ...model, executionHost: "cloud" as const, available: true })),
+      ...this.connectedDevices().flatMap((device) => device.models.map((model) => ({
+        ...model,
+        executionHost: "device" as const,
+        deviceId: device.id,
+        available: true,
+      }))),
+    ];
+  }
+
+  private async hybridSettings(userId: string): Promise<AgentSettings> {
+    const base = await getSettings(this.env.DB, this.env, userId);
+    const models = this.hybridModels(base.models);
+    const preferred = await this.ctx.storage.get<PreferredDeviceModel>("preferred-device-model");
+    const selected = preferred && models.some((model) => model.deviceId === preferred.deviceId && model.provider === preferred.provider && model.id === preferred.modelId)
+      ? { provider: preferred.provider, id: preferred.modelId }
+      : base.selectedModel;
+    return {
+      ...base,
+      models,
+      selectedModel: selected,
+      thinkingLevel: preferred?.thinkingLevel ?? base.thinkingLevel,
+      systemInstructions: preferred?.systemInstructions ?? base.systemInstructions,
+    };
   }
 
   private async runPrompt(userId: string, chatId: string, content: string): Promise<void> {
     this.running = true;
     this.abortRequested = false;
+    const turnId = crypto.randomUUID();
     let assistant: ChatMessage | undefined;
     try {
-      const userMessage = await appendMessage(this.env.DB, userId, chatId, "user", content, "complete");
+      const settings = await getSettings(this.env.DB, this.env, userId);
+      const provenance = { executionHost: "cloud" as const, model: `${settings.selectedModel.provider}/${settings.selectedModel.id}`, private: false };
+      const userMessage = await appendMessage(this.env.DB, userId, chatId, "user", content, "complete", provenance);
       this.broadcast("message.append", { chatId, message: userMessage });
-      assistant = await appendMessage(this.env.DB, userId, chatId, "assistant", "", "streaming");
+      assistant = await appendMessage(this.env.DB, userId, chatId, "assistant", "", "streaming", provenance);
       this.broadcast("message.append", { chatId, message: assistant });
       this.broadcast("run.status", { chatId, status: "running" });
+      this.broadcast("route.status", { chatId, turnId, host: "cloud", private: false, status: "running" });
 
-      const [chat, settings, memories] = await Promise.all([
+      const [chat, memories] = await Promise.all([
         getChat(this.env.DB, userId, chatId),
-        getSettings(this.env.DB, this.env, userId),
         retrieveMemories(this.env, userId, content),
       ]);
       const messages = buildModelMessages(settings, memories, chat.messages.filter((message) => message.id !== assistant!.id));
       await this.continueTurn(userId, chatId, assistant.id, messages, "");
+      this.broadcast("route.status", { chatId, turnId, host: "cloud", private: false, status: "complete" });
     } catch (error) {
       if (assistant) {
         const message = this.abortRequested ? "Stopped." : `I couldn’t complete that response: ${errorMessage(error)}`;
@@ -229,6 +528,7 @@ export class EvaAgent extends DurableObject<Env> {
         this.broadcast("assistant.delta", { chatId, messageId: assistant.id, delta: message });
       }
       this.broadcast("run.status", { chatId, status: this.abortRequested ? "aborted" : "error" });
+      this.broadcast("route.status", { chatId, turnId, host: "cloud", private: false, status: "error" });
       if (!this.abortRequested) this.broadcast("server.error", { code: "AGENT_ERROR", message: errorMessage(error) });
     } finally {
       this.running = false;
@@ -442,6 +742,11 @@ function normalizeLegacyInput(value: unknown): Record<string, unknown> {
 
 function safeJson(raw: string): unknown {
   try { return JSON.parse(raw); } catch { return null; }
+}
+
+function selectedDeviceModel(device: DeviceCapability): string | undefined {
+  const model = device.models.find((candidate) => candidate.available !== false);
+  return model ? `${model.provider}/${model.id}` : undefined;
 }
 
 function errorMessage(error: unknown): string {

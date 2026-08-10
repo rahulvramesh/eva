@@ -231,6 +231,7 @@ export class PiAgentBackend implements AgentBackend {
       name: model.name,
       contextWindow: model.contextWindow,
       thinkingLevels: supportedThinkingLevels(model),
+      localInference: isLocalInferenceProvider(model.provider),
     })).sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
     if (!models.length) throw new Error("No configured Pi models are available. Configure a provider in Pi first.");
 
@@ -264,6 +265,10 @@ export class PiAgentBackend implements AgentBackend {
     }, null, 2), "utf8");
     await rename(temporary, this.settingsPath);
   }
+}
+
+function isLocalInferenceProvider(provider: string): boolean {
+  return /^(ollama|lmstudio|lm-studio|local|llamacpp|llama-cpp|vllm)$/i.test(provider);
 }
 
 function serializableRecord(value: unknown): Record<string, unknown> {

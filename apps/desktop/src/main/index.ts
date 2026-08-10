@@ -1,12 +1,14 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, shell, Tray } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, safeStorage, shell, Tray } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 
 type ConnectionInfo = { url: string; token: string };
 type WindowState = { width: number; height: number; x?: number; y?: number };
+type CloudConfiguration = { endpoint: string; token: string };
 
 let mainWindow: BrowserWindow | null = null;
 let agentProcess: ChildProcess | null = null;
@@ -181,6 +183,18 @@ function registerIpc(): void {
     if (!connection) throw new Error("Agent server is not ready");
     return connection;
   });
+  ipcMain.handle("eva:device-info", (event) => {
+    validateSender(event.senderFrame?.url ?? "");
+    return loadDeviceInfo();
+  });
+  ipcMain.handle("eva:cloud-config:get", (event) => {
+    validateSender(event.senderFrame?.url ?? "");
+    return loadCloudConfiguration();
+  });
+  ipcMain.handle("eva:cloud-config:set", (event, value: CloudConfiguration) => {
+    validateSender(event.senderFrame?.url ?? "");
+    saveCloudConfiguration(value);
+  });
   ipcMain.on("eva:window", (event, action: string) => {
     validateSender(event.senderFrame?.url ?? "");
     const window = BrowserWindow.fromWebContents(event.sender);
@@ -267,6 +281,53 @@ function findFreePort(): Promise<number> {
 
 function statePath(): string {
   return join(app.getPath("userData"), "window-state.json");
+}
+
+function loadDeviceInfo(): { id: string; name: string; platform: string; workspace: string } {
+  const path = join(app.getPath("userData"), "device.json");
+  let id: string | undefined;
+  try {
+    const saved = JSON.parse(readFileSync(path, "utf8")) as { id?: string };
+    if (typeof saved.id === "string" && saved.id.length >= 16) id = saved.id;
+  } catch {
+    // A device identity is created on first launch.
+  }
+  if (!id) {
+    id = randomBytes(24).toString("hex");
+    writeFileSync(path, JSON.stringify({ id }), { mode: 0o600 });
+  }
+  return {
+    id,
+    name: hostname() || (process.platform === "win32" ? "Windows PC" : "Mac"),
+    platform: process.platform,
+    workspace: join(app.getPath("userData"), "workspace"),
+  };
+}
+
+function cloudConfigurationPath(): string {
+  return join(app.getPath("userData"), "cloud-configuration.json");
+}
+
+function loadCloudConfiguration(): CloudConfiguration | undefined {
+  try {
+    const saved = JSON.parse(readFileSync(cloudConfigurationPath(), "utf8")) as { endpoint?: string; encryptedToken?: string };
+    if (!saved.endpoint || !saved.encryptedToken || !safeStorage.isEncryptionAvailable()) return undefined;
+    return {
+      endpoint: saved.endpoint,
+      token: safeStorage.decryptString(Buffer.from(saved.encryptedToken, "base64")),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function saveCloudConfiguration(value: CloudConfiguration): void {
+  const endpoint = typeof value?.endpoint === "string" ? value.endpoint.trim().replace(/\/$/, "") : "";
+  const token = typeof value?.token === "string" ? value.token.trim() : "";
+  if (!endpoint || !token) throw new Error("Cloud endpoint and token are required.");
+  if (!safeStorage.isEncryptionAvailable()) throw new Error("Secure credential storage is unavailable on this device.");
+  const encryptedToken = safeStorage.encryptString(token).toString("base64");
+  writeFileSync(cloudConfigurationPath(), JSON.stringify({ endpoint, encryptedToken }), { mode: 0o600 });
 }
 
 function loadWindowState(): WindowState {

@@ -31,13 +31,15 @@ import {
   type ChatMessage,
   type ChatSummary,
   type AgentSettings,
+  type DeviceCapability,
   type Memory,
   type MemoryKind,
+  type RoutingPolicy,
   type ThinkingLevel,
   type ServerEvent,
   type ToolCall,
 } from "../../../../../packages/protocol/src/index";
-import { configuredRuntime, EvaClient, saveCloudConfiguration, type EvaRuntime } from "./eva-client";
+import { EvaClient, hasCloudConfiguration, saveCloudConfiguration } from "./eva-client";
 import evaLogo from "./assets/eva-app-icon.png";
 
 export function App() {
@@ -49,16 +51,22 @@ export function App() {
   const [draft, setDraft] = useState("");
   const [connected, setConnected] = useState(false);
   const [running, setRunning] = useState(false);
-  const [agentMode, setAgentMode] = useState<"pi" | "fake" | "cloud">("pi");
+  const [agentMode, setAgentMode] = useState<"pi" | "fake" | "cloud" | "hybrid">("pi");
   const [error, setError] = useState<string>();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<AgentSettings>();
   const [memories, setMemories] = useState<Memory[]>([]);
-  const [runtime] = useState<EvaRuntime>(() => configuredRuntime());
-  const [authenticationRequired, setAuthenticationRequired] = useState(() => configuredRuntime() === "cloud" && !localStorage.getItem("eva-cloud-token"));
+  const [authenticationRequired, setAuthenticationRequired] = useState(() => window.eva ? false : !hasCloudConfiguration());
+  const [devices, setDevices] = useState<DeviceCapability[]>([]);
+  const [routing, setRouting] = useState<RoutingPolicy>(() => {
+    const saved = localStorage.getItem("eva-routing-policy");
+    return saved === "cloud" || saved === "device" || saved === "private" ? saved : "auto";
+  });
+  const [routeStatus, setRouteStatus] = useState<Extract<ServerEvent, { type: "route.status" }>["payload"]>();
   const [theme, setTheme] = useState<"light" | "dark">(() => localStorage.getItem("eva-theme") === "light" ? "light" : "dark");
   const [showToolCalls, setShowToolCalls] = useState(() => localStorage.getItem("eva-show-tool-calls") !== "false");
+  const [syncOfflineToolOutput, setSyncOfflineToolOutput] = useState(() => localStorage.getItem("eva-sync-offline-tool-output") === "true");
 
   useEffect(() => {
     document.documentElement.dataset.platform = window.eva?.platform ?? "web";
@@ -89,6 +97,14 @@ export function App() {
   useEffect(() => {
     localStorage.setItem("eva-show-tool-calls", String(showToolCalls));
   }, [showToolCalls]);
+
+  useEffect(() => {
+    localStorage.setItem("eva-sync-offline-tool-output", String(syncOfflineToolOutput));
+  }, [syncOfflineToolOutput]);
+
+  useEffect(() => {
+    localStorage.setItem("eva-routing-policy", routing);
+  }, [routing]);
 
   useEffect(() => {
     const node = transcriptRef.current;
@@ -138,7 +154,12 @@ export function App() {
         break;
       case "tool.call":
         if (event.payload.chatId === activeChatRef.current) {
-          setActiveChat((chat) => chat && ({ ...chat, toolCalls: [...chat.toolCalls, event.payload.toolCall] }));
+          setActiveChat((chat) => chat && ({
+            ...chat,
+            toolCalls: chat.toolCalls.some((toolCall) => toolCall.id === event.payload.toolCall.id)
+              ? chat.toolCalls.map((toolCall) => toolCall.id === event.payload.toolCall.id ? event.payload.toolCall : toolCall)
+              : [...chat.toolCalls, event.payload.toolCall],
+          }));
         }
         break;
       case "tool.update":
@@ -152,6 +173,22 @@ export function App() {
       case "run.status":
         setRunning(event.payload.status === "running");
         if (event.payload.status === "error") setError("The model could not complete that response.");
+        break;
+      case "device.presence":
+        setDevices(event.payload.devices);
+        break;
+      case "route.status":
+        if (event.payload.chatId === activeChatRef.current) setRouteStatus(event.payload);
+        break;
+      case "device.turn.complete":
+        if (event.payload.chatId === activeChatRef.current) {
+          setActiveChat((chat) => chat && ({
+            ...chat,
+            messages: chat.messages.map((message) => message.id === event.payload.messageId
+              ? { ...message, content: event.payload.content, status: event.payload.status }
+              : message),
+          }));
+        }
         break;
       case "settings.snapshot":
       case "settings.updated":
@@ -196,7 +233,7 @@ export function App() {
     if (!content || !activeChat || running) return;
     setDraft("");
     setError(undefined);
-    clientRef.current?.send(command("message.send", { chatId: activeChat.id, content }));
+    clientRef.current?.send(command("message.send", { chatId: activeChat.id, content, routing }));
   }
 
   function stop(): void {
@@ -207,8 +244,8 @@ export function App() {
     <div className="app-shell">
       {authenticationRequired && (
         <CloudLogin
-          onConnect={(endpoint, token) => {
-            saveCloudConfiguration(endpoint, token);
+          onConnect={async (endpoint, token) => {
+            await saveCloudConfiguration(endpoint, token);
             location.reload();
           }}
         />
@@ -279,12 +316,12 @@ export function App() {
                 onThemeChange={setTheme}
                 showToolCalls={showToolCalls}
                 onShowToolCallsChange={setShowToolCalls}
+                syncOfflineToolOutput={syncOfflineToolOutput}
+                onSyncOfflineToolOutputChange={setSyncOfflineToolOutput}
                 memories={memories}
-                runtime={runtime}
-                onRuntimeChange={(nextRuntime) => {
-                  localStorage.setItem("eva-runtime", nextRuntime);
-                  location.reload();
-                }}
+                devices={devices}
+                routing={routing}
+                onRoutingChange={setRouting}
                 onMemoryCreate={(kind, content) => clientRef.current?.send(command("memory.create", { kind, content, importance: 5 }))}
                 onMemoryUpdate={(memory) => clientRef.current?.send(command("memory.update", {
                   memoryId: memory.id,
@@ -342,7 +379,11 @@ export function App() {
                 <span>{settings ? selectedModelName(settings) : connected ? `${agentMode === "fake" ? "Demo" : agentMode === "cloud" ? "Cloud" : "Pi"} ready` : "Connecting…"}</span>
                 <CaretDown weight="bold" />
               </button>
-              <span>{window.eva ? `${window.eva.platform === "darwin" ? "⌘⇧Space" : "Ctrl+Shift+Space"} to hide` : agentMode === "cloud" ? "Private cloud session" : "Browser preview"}</span>
+              <span>{routeStatus && (routeStatus.status === "queued" || routeStatus.status === "running")
+                ? `Running on ${routeStatus.host === "device" ? deviceName(devices, routeStatus.deviceId) : "Eva Cloud"}`
+                : window.eva
+                  ? `${devices.filter((device) => device.online).length} device${devices.filter((device) => device.online).length === 1 ? "" : "s"} online · ${window.eva.platform === "darwin" ? "⌘⇧Space" : "Ctrl+Shift+Space"}`
+                  : agentMode === "hybrid" || agentMode === "cloud" ? "Synced with Eva Cloud" : "Browser preview"}</span>
             </div>
           </div>
       </main>
@@ -350,16 +391,19 @@ export function App() {
   );
 }
 
-function CloudLogin({ onConnect }: { onConnect: (endpoint: string, token: string) => void }) {
-  const [endpoint, setEndpoint] = useState(() => localStorage.getItem("eva-cloud-endpoint") || location.origin);
+function CloudLogin({ onConnect }: { onConnect: (endpoint: string, token: string) => Promise<void> }) {
+  const [endpoint, setEndpoint] = useState(() => localStorage.getItem("eva-cloud-endpoint") || (location.protocol.startsWith("http") ? location.origin : "https://eva-cloud.rahulvramesh.workers.dev"));
   const [token, setToken] = useState("");
+  const [loginError, setLoginError] = useState<string>();
   return (
     <div className="cloud-login-backdrop">
       <form
         className="cloud-login"
         onSubmit={(event) => {
           event.preventDefault();
-          if (endpoint.trim() && token.trim()) onConnect(endpoint, token);
+          if (endpoint.trim() && token.trim()) void onConnect(endpoint, token).catch((reason) => {
+            setLoginError(reason instanceof Error ? reason.message : "Could not store the cloud credential securely.");
+          });
         }}
       >
         <img src={evaLogo} alt="" />
@@ -367,6 +411,7 @@ function CloudLogin({ onConnect }: { onConnect: (endpoint: string, token: string
         <p>Enter the private access token created during deployment. It stays on this device.</p>
         <label><span>Cloud endpoint</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} type="url" required /></label>
         <label><span>Access token</span><input value={token} onChange={(event) => setToken(event.target.value)} type="password" autoComplete="current-password" required autoFocus /></label>
+        {loginError && <p className="cloud-login-error" role="alert">{loginError}</p>}
         <button type="submit" disabled={!endpoint.trim() || !token.trim()}><Cloud weight="fill" /> Connect securely</button>
       </form>
     </div>
@@ -380,9 +425,12 @@ function SettingsPopover({
   onThemeChange,
   showToolCalls,
   onShowToolCallsChange,
+  syncOfflineToolOutput,
+  onSyncOfflineToolOutputChange,
   memories,
-  runtime,
-  onRuntimeChange,
+  devices,
+  routing,
+  onRoutingChange,
   onMemoryCreate,
   onMemoryUpdate,
   onMemoryDelete,
@@ -395,9 +443,12 @@ function SettingsPopover({
   onThemeChange: (theme: "light" | "dark") => void;
   showToolCalls: boolean;
   onShowToolCallsChange: (show: boolean) => void;
+  syncOfflineToolOutput: boolean;
+  onSyncOfflineToolOutputChange: (sync: boolean) => void;
   memories: Memory[];
-  runtime: EvaRuntime;
-  onRuntimeChange: (runtime: EvaRuntime) => void;
+  devices: DeviceCapability[];
+  routing: RoutingPolicy;
+  onRoutingChange: (routing: RoutingPolicy) => void;
   onMemoryCreate: (kind: MemoryKind, content: string) => void;
   onMemoryUpdate: (memory: Memory) => void;
   onMemoryDelete: (memoryId: string) => void;
@@ -455,13 +506,13 @@ function SettingsPopover({
           >
             {providers.map(([provider, models]) => (
               <optgroup key={provider} label={formatProvider(provider)}>
-                {models.map((model) => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}
+                {models.map((model) => <option key={`${model.provider}/${model.id}/${model.deviceId ?? "cloud"}`} value={`${model.provider}/${model.id}`}>{model.name} · {model.executionHost === "device" ? deviceName(devices, model.deviceId) : "Cloud"}</option>)}
               </optgroup>
             ))}
           </select>
           <CaretDown weight="bold" />
         </div>
-        {selected?.contextWindow && <small>{formatProvider(selected.provider)} · {formatContext(selected.contextWindow)} context</small>}
+        {selected?.contextWindow && <small>{formatProvider(selected.provider)} · {formatContext(selected.contextWindow)} context · {selected.executionHost === "device" ? deviceName(devices, selected.deviceId) : "Eva Cloud"}</small>}
       </label>
 
       <label className="settings-field">
@@ -513,20 +564,47 @@ function SettingsPopover({
         <small>Shows commands, fetched URLs, output, and completion status in the conversation.</small>
       </div>
 
-      <div className="appearance-field">
-        <span>Runtime</span>
-        <div className="theme-switch" role="group" aria-label="Eva runtime">
-          <button type="button" className={runtime === "local" ? "active" : ""} onClick={() => onRuntimeChange("local")} aria-pressed={runtime === "local"}>
-            <TerminalWindow weight="bold" /> This device
+      <div className="appearance-field tool-visibility-field">
+        <span>Offline Tool Output Sync</span>
+        <div className="theme-switch" role="group" aria-label="Offline tool output sync">
+          <button type="button" className={!syncOfflineToolOutput ? "active" : ""} onClick={() => onSyncOfflineToolOutputChange(false)} aria-pressed={!syncOfflineToolOutput}>
+            <EyeSlash weight="bold" /> Keep local
           </button>
-          <button type="button" className={runtime === "cloud" ? "active" : ""} onClick={() => onRuntimeChange("cloud")} aria-pressed={runtime === "cloud"}>
-            <Cloud weight="fill" /> Eva Cloud
+          <button type="button" className={syncOfflineToolOutput ? "active" : ""} onClick={() => onSyncOfflineToolOutputChange(true)} aria-pressed={syncOfflineToolOutput}>
+            <Cloud weight="fill" /> Sync output
           </button>
         </div>
-        <small>Cloud mode syncs chats and memory and runs commands in an isolated Cloudflare workspace.</small>
+        <small>Chat responses always sync after reconnect. Command output stays on the device by default to reduce accidental data exposure.</small>
       </div>
 
-      {runtime === "cloud" && (
+      <div className="appearance-field">
+        <span>Execution</span>
+        <div className="route-grid" role="group" aria-label="Execution preference">
+          <button type="button" className={routing === "auto" ? "active" : ""} onClick={() => onRoutingChange("auto")} aria-pressed={routing === "auto"}>
+            <Sparkle weight="fill" /> Auto
+          </button>
+          <button type="button" className={routing === "cloud" ? "active" : ""} onClick={() => onRoutingChange("cloud")} aria-pressed={routing === "cloud"}>
+            <Cloud weight="fill" /> Cloud
+          </button>
+          <button type="button" className={routing === "device" ? "active" : ""} onClick={() => onRoutingChange("device")} aria-pressed={routing === "device"}>
+            <TerminalWindow weight="bold" /> This device
+          </button>
+          <button type="button" className={routing === "private" ? "active" : ""} onClick={() => onRoutingChange("private")} aria-pressed={routing === "private"}>
+            <EyeSlash weight="bold" /> Private
+          </button>
+        </div>
+        <small>{routingDescription(routing)}</small>
+        <div className="device-list">
+          {devices.length ? devices.map((device) => (
+            <div key={device.id} className={device.online ? "device online" : "device"}>
+              <Circle weight="fill" />
+              <span>{device.name}</span>
+              <small>{device.online ? `${device.models.length} models · Bash and files ready` : "Offline"}</small>
+            </div>
+          )) : <div className="device"><Circle weight="fill" /><span>No device connected</span><small>Cloud-only tasks remain available</small></div>}
+        </div>
+      </div>
+
         <div className="memory-settings">
           <div className="memory-heading"><span>Online Memory</span><strong>{memories.filter((memory) => memory.status === "active").length}</strong></div>
           <div className="memory-create">
@@ -566,7 +644,6 @@ function SettingsPopover({
           </div>
           <small>Click a memory to archive or restore it. Deleted memories are removed from semantic retrieval.</small>
         </div>
-      )}
 
       <div className="settings-footer">
         <span>Model changes apply to the next message</span>
@@ -679,6 +756,18 @@ function relativeDate(iso: string): string {
 
 function selectedModelName(settings: AgentSettings): string {
   return settings.models.find((model) => model.provider === settings.selectedModel.provider && model.id === settings.selectedModel.id)?.name ?? "Choose model";
+}
+
+function deviceName(devices: DeviceCapability[], deviceId?: string): string {
+  if (!deviceId) return "this device";
+  return devices.find((device) => device.id === deviceId)?.name ?? "this device";
+}
+
+function routingDescription(routing: RoutingPolicy): string {
+  if (routing === "cloud") return "Use Eva Cloud for this chat unless you change it.";
+  if (routing === "device") return "Run the next turns through Pi and tools on your connected device.";
+  if (routing === "private") return "Keep execution on your device. Eva will not silently fall back to cloud execution.";
+  return "Eva chooses the safest capable host. File and shell work stays on your device; other tasks use cloud by default.";
 }
 
 function formatProvider(provider: string): string {

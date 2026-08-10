@@ -10,7 +10,7 @@ const timeoutMs = Number(process.env.EVA_E2E_TIMEOUT_MS ?? 90_000);
 const bashCommand = process.env.EVA_E2E_KEEP_WORKSPACE_FILE === "1"
   ? "printf EVA_SANDBOX_OK > eva-sandbox-e2e.txt && cat eva-sandbox-e2e.txt"
   : "printf EVA_SANDBOX_OK > eva-sandbox-e2e.txt && cat eva-sandbox-e2e.txt && rm eva-sandbox-e2e.txt";
-const socket = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/api/ws`, ["eva-v1", `eva-token.${token}`]);
+const socket = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/api/ws`, ["eva-v2", `eva-token.${token}`]);
 const received = [];
 const waiters = [];
 
@@ -48,7 +48,7 @@ function waitFor(predicate, label) {
 }
 
 function send(type, payload = {}) {
-  socket.send(JSON.stringify({ version: 1, requestId: crypto.randomUUID(), type, ...payload }));
+  socket.send(JSON.stringify({ version: 2, requestId: crypto.randomUUID(), type, ...payload }));
 }
 
 async function run() {
@@ -57,6 +57,13 @@ async function run() {
   send("settings.get");
   const settings = await waitFor((event) => event.type === "settings.snapshot", "settings");
   if (settings.payload.settings.selectedModel.provider !== "cloudflare") throw new Error("Cloud model settings were not loaded.");
+
+  send("memory.list");
+  const existingMemory = await waitFor((event) => event.type === "memory.snapshot", "existing memory snapshot");
+  for (const item of existingMemory.payload.memories.filter((memory) => memory.content.startsWith("Eva cloud e2e "))) {
+    send("memory.delete", { memoryId: item.id });
+    await waitFor((event) => event.type === "memory.deleted" && event.payload.memoryId === item.id, "stale memory cleanup");
+  }
 
   send("chat.create");
   const created = await waitFor((event) => event.type === "chat.created", "chat creation");
@@ -73,7 +80,7 @@ async function run() {
   if (!snapshot.payload.memories.length) throw new Error("Memory snapshot was empty.");
 
   received.length = 0;
-  send("message.send", { chatId, content: "Reply with exactly: EVA_CLOUD_CHAT_OK" });
+  send("message.send", { chatId, content: "Reply with exactly: EVA_CLOUD_CHAT_OK", routing: "cloud" });
   await waitFor((event) => event.type === "run.status" && event.payload.chatId === chatId && event.payload.status === "idle", "chat completion");
   const chatText = received.filter((event) => event.type === "assistant.delta").map((event) => event.payload.delta).join("");
   if (!chatText.includes("EVA_CLOUD_CHAT_OK")) throw new Error(`Unexpected chat response: ${chatText}`);
@@ -82,6 +89,7 @@ async function run() {
   send("message.send", {
     chatId,
     content: `Use the bash tool now to run: ${bashCommand}. Do not answer without using the bash tool.`,
+    routing: "cloud",
   });
   const pending = await waitFor(
     (event) => event.type === "tool.call" && event.payload.toolCall.name === "bash" && event.payload.toolCall.status === "pending",

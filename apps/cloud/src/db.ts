@@ -16,6 +16,10 @@ type MessageRow = {
   content: string;
   status: ChatMessage["status"];
   created_at: string;
+  execution_host: ChatMessage["executionHost"] | null;
+  device_id: string | null;
+  model: string | null;
+  private: number;
 };
 type ToolRow = {
   id: string;
@@ -97,7 +101,7 @@ export async function getChat(db: D1Database, userId: string, chatId: string): P
   if (!row) throw new Error("Chat not found.");
   const [messages, tools] = await Promise.all([
     db.prepare(`
-      SELECT id, role, content, status, created_at FROM messages
+      SELECT id, role, content, status, created_at, execution_host, device_id, model, private FROM messages
       WHERE chat_id = ?1 AND user_id = ?2 ORDER BY created_at
     `).bind(chatId, userId).all<MessageRow>(),
     db.prepare(`
@@ -119,6 +123,7 @@ export async function appendMessage(
   role: ChatMessage["role"],
   content: string,
   status: ChatMessage["status"],
+  provenance: Pick<ChatMessage, "executionHost" | "deviceId" | "model" | "private"> = {},
 ): Promise<ChatMessage> {
   await assertChatOwner(db, userId, chatId);
   const message: ChatMessage = {
@@ -127,13 +132,14 @@ export async function appendMessage(
     content,
     status,
     createdAt: new Date().toISOString(),
+    ...provenance,
   };
   const title = role === "user" ? titleFromPrompt(content) : null;
   await db.batch([
     db.prepare(`
-      INSERT INTO messages (id, chat_id, user_id, role, content, status, created_at)
-      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-    `).bind(message.id, chatId, userId, role, content, status, message.createdAt),
+      INSERT INTO messages (id, chat_id, user_id, role, content, status, created_at, execution_host, device_id, model, private)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+    `).bind(message.id, chatId, userId, role, content, status, message.createdAt, message.executionHost ?? null, message.deviceId ?? null, message.model ?? null, message.private ? 1 : 0),
     db.prepare(`
       UPDATE chats SET updated_at = ?1,
         title = CASE WHEN title = 'New chat' AND ?2 IS NOT NULL THEN ?2 ELSE title END
@@ -141,6 +147,45 @@ export async function appendMessage(
     `).bind(message.createdAt, title, chatId, userId),
   ]);
   return message;
+}
+
+export async function appendMessageWithId(
+  db: D1Database,
+  userId: string,
+  chatId: string,
+  message: ChatMessage,
+): Promise<ChatMessage> {
+  await assertChatOwner(db, userId, chatId);
+  const title = message.role === "user" ? titleFromPrompt(message.content) : null;
+  await db.batch([
+    db.prepare(`
+      INSERT INTO messages (id, chat_id, user_id, role, content, status, created_at, execution_host, device_id, model, private)
+      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+      ON CONFLICT(id) DO NOTHING
+    `).bind(message.id, chatId, userId, message.role, message.content, message.status, message.createdAt, message.executionHost ?? null, message.deviceId ?? null, message.model ?? null, message.private ? 1 : 0),
+    db.prepare(`
+      UPDATE chats SET updated_at = MAX(updated_at, ?1),
+        title = CASE WHEN title = 'New chat' AND ?2 IS NOT NULL THEN ?2 ELSE title END
+      WHERE id = ?3 AND user_id = ?4
+    `).bind(message.createdAt, title, chatId, userId),
+  ]);
+  return message;
+}
+
+export async function importTurn(
+  db: D1Database,
+  userId: string,
+  input: { chatId: string; title: string; createdAt: string; userMessage: ChatMessage; assistantMessage: ChatMessage; toolCalls: ToolCall[] },
+): Promise<void> {
+  const updatedAt = [input.userMessage.createdAt, input.assistantMessage.createdAt].sort().at(-1) ?? input.createdAt;
+  await db.prepare(`
+    INSERT INTO chats (id, user_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
+    ON CONFLICT(id) DO UPDATE SET updated_at = MAX(chats.updated_at, excluded.updated_at)
+    WHERE chats.user_id = excluded.user_id
+  `).bind(input.chatId, userId, input.title, input.createdAt, updatedAt).run();
+  await appendMessageWithId(db, userId, input.chatId, input.userMessage);
+  await appendMessageWithId(db, userId, input.chatId, input.assistantMessage);
+  for (const toolCall of input.toolCalls) await upsertToolCall(db, userId, input.chatId, toolCall);
 }
 
 export async function updateMessage(
@@ -230,6 +275,35 @@ export async function updateToolCall(
   `).bind(id, userId).first<ToolRow>();
   if (!row) throw new Error("Tool call not found.");
   return toToolCall(row);
+}
+
+export async function upsertToolCall(
+  db: D1Database,
+  userId: string,
+  chatId: string,
+  toolCall: ToolCall,
+): Promise<ToolCall> {
+  await assertChatOwner(db, userId, chatId);
+  await db.prepare(`
+    INSERT INTO tool_calls
+      (id, chat_id, user_id, assistant_message_id, name, input_json, output, status, created_at, completed_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+    ON CONFLICT(id) DO UPDATE SET output = excluded.output, status = excluded.status,
+      completed_at = excluded.completed_at
+    WHERE tool_calls.user_id = excluded.user_id
+  `).bind(
+    toolCall.id,
+    chatId,
+    userId,
+    toolCall.assistantMessageId,
+    toolCall.name,
+    JSON.stringify(toolCall.input),
+    toolCall.output,
+    toolCall.status,
+    toolCall.createdAt,
+    toolCall.completedAt ?? null,
+  ).run();
+  return toolCall;
 }
 
 export async function saveApproval(
@@ -354,7 +428,17 @@ function toChatSummary(row: ChatRow): ChatSummary {
 }
 
 function toMessage(row: MessageRow): ChatMessage {
-  return { id: row.id, role: row.role, content: row.content, status: row.status, createdAt: row.created_at };
+  return {
+    id: row.id,
+    role: row.role,
+    content: row.content,
+    status: row.status,
+    createdAt: row.created_at,
+    executionHost: row.execution_host ?? undefined,
+    deviceId: row.device_id ?? undefined,
+    model: row.model ?? undefined,
+    private: Boolean(row.private),
+  };
 }
 
 function toToolCall(row: ToolRow): ToolCall {

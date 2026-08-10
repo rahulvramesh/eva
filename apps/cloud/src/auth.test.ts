@@ -20,7 +20,7 @@ describe("Eva cloud authentication", () => {
 
   it("accepts a WebSocket subprotocol token so credentials stay out of URLs", async () => {
     const user = await authenticate(new Request("https://eva.example/api/ws", {
-      headers: { "sec-websocket-protocol": "eva-v1, eva-token.a-long-random-test-token" },
+      headers: { "sec-websocket-protocol": "eva-v2, eva-token.a-long-random-test-token" },
     }), env);
 
     expect(user?.method).toBe("token");

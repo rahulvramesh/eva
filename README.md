@@ -1,6 +1,6 @@
 # Eva
 
-Eva is a lightweight personal assistant built as a compact Electron window. It can run locally with the Pi coding-agent SDK or connect from Electron and the browser to Eva Cloud on Cloudflare.
+Eva is a lightweight personal assistant built as a compact Electron window. One synced chat combines Eva Cloud with the Pi coding-agent SDK and tools on your connected computers.
 
 ## Use the app
 
@@ -14,12 +14,15 @@ Eva is a lightweight personal assistant built as a compact Electron window. It c
 - Switch between persisted Light and Dark appearances from Assistant Settings.
 - Eva can run shell commands in its private workspace and fetch readable content from public web pages. Windows uses Git Bash when installed and otherwise falls back to PowerShell.
 - Tool calls appear as compact expandable transcript rows with input, output, and status. Use **Assistant Settings → Tool Call Details** to show or hide them; the preference persists locally.
+- There is no local/cloud mode switch. **Execution → Auto** keeps ordinary answers in Cloudflare and routes file, repository, terminal, and installed-software tasks to an online Eva desktop. Cloud and This device are explicit overrides.
+- **Private** requires a verified on-device Pi model such as Ollama and never silently falls back to cloud inference. Chats still sync unless the computer is offline.
+- Offline chats run through Pi and enter an outbox. Responses sync after reconnect; local command output is redacted by default unless **Offline Tool Output Sync** is enabled.
 
 Eva uses the current `@earendil-works/pi-coding-agent` SDK and the Pi credentials already configured on the machine. If Pi is not configured, run `pi` in a terminal and use `/login` first.
 
 ## Eva Cloud
 
-Eva Cloud adds access from any browser or Eva desktop installation while keeping the local Pi mode available:
+Eva Cloud provides the canonical synced chat and automatically discovers connected Eva desktop devices:
 
 - a Cloudflare Worker serves the React app and authenticated API;
 - one hibernating Durable Object coordinates each user's realtime WebSocket session;
@@ -29,12 +32,14 @@ Eva Cloud adds access from any browser or Eva desktop installation while keeping
 - Bash runs only after explicit approval in an isolated Sandbox container;
 - each user gets a credential-less, prefix-scoped R2 mount at `/workspace/data` so cloud Bash files survive container sleep;
 - `web_fetch` accepts public HTTP(S) text/JSON/XML, revalidates redirects, blocks local/private targets, and bounds time and response size.
+- device execution uses an outbound-only authenticated WebSocket; no inbound port, router configuration, or Cloudflare Tunnel to the laptop is required;
+- protocol v2 streams device model capabilities, route provenance, tool events, cancellation, presence, and idempotent offline-turn imports.
 
-The hosted backend uses Cloudflare Workers AI. Local mode continues to use the Pi coding-agent SDK and your machine's Pi credentials. A cloud session cannot execute Bash on an offline laptop; it executes Linux Bash in the isolated cloud workspace. Select **Assistant Settings → Runtime → Eva Cloud** and enter the deployed endpoint and private token once. The token remains in that browser or Electron profile.
+The hosted backend uses Cloudflare Workers AI. Connected desktop turns use the Pi coding-agent SDK, its configured models, and the device's Eva workspace. If no desktop is online, Auto falls back to cloud for ordinary requests and reports a clear error for an explicitly device-only task. Enter the deployed endpoint and private token once: Electron encrypts it with macOS Keychain-backed safe storage or Windows DPAPI; the browser keeps its token in that browser profile.
 
 ### Deploy
 
-Cloud resources are declared in `wrangler.jsonc`; the initial D1 schema is in `migrations/d1/0001_initial.sql`.
+Cloud resources are declared in `wrangler.jsonc`; D1 migrations are in `migrations/d1`.
 
 ```bash
 pnpm install
@@ -64,7 +69,7 @@ pnpm exec wrangler secret put ACCESS_TEAM_DOMAIN  # example: your-team.cloudflar
 pnpm exec wrangler secret put ACCESS_AUD
 ```
 
-Never commit `.dev.vars` or `.eva-cloud-token`. Rotate the owner token with `wrangler secret put EVA_API_TOKEN`. Every Bash invocation is pending until the user approves or rejects it in the transcript.
+Never commit `.dev.vars` or `.eva-cloud-token`. Rotate the owner token with `wrangler secret put EVA_API_TOKEN`. Cloud Sandbox Bash is pending until the user approves or rejects it in the transcript. Device Bash starts in Eva's configured workspace but remains powerful.
 
 ### Expected cost
 
@@ -87,16 +92,13 @@ pnpm package:windows:dir  # unpacked Windows x64 app
 ## Architecture
 
 ```text
-Electron renderer ── authenticated WebSocket ── local agent server ── Pi SDK
-        │                                             │
-        └── window UI only                            └── sessions + streaming
-
-Electron main ── supervises local server + owns window/global shortcut
-
 Browser / Electron ── authenticated WebSocket ── Worker ── per-user Durable Object
-                                                    ├── D1 chats + settings
-                                                    ├── Workers AI + Vectorize memory
-                                                    └── approved Bash ── Sandbox ── R2
+          │                                         ├── D1 canonical chats + provenance
+          │                                         ├── Workers AI + Vectorize memory
+          │                                         └── approved cloud Bash ── Sandbox ── R2
+          │
+          └── Electron outbound device bridge ── loopback agent server ── Pi SDK + local tools
+                       └── offline outbox ────────────────┘
 ```
 
 - `apps/desktop`: Electron main/preload and React renderer.

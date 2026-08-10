@@ -41,4 +41,43 @@ describe("protocol", () => {
     });
     expect(chat.toolCalls).toEqual([]);
   });
+
+  it("validates hybrid device registration and execution commands", () => {
+    const device = {
+      id: "device-1",
+      name: "Rahul's Mac",
+      platform: "darwin",
+      workspace: "/Users/rahul/workspace",
+      models: [{
+        provider: "ollama",
+        id: "qwen3",
+        name: "Qwen 3",
+        thinkingLevels: ["off" as const],
+        executionHost: "device" as const,
+        deviceId: "device-1",
+        localInference: true,
+      }],
+      tools: ["bash", "web_fetch"],
+    };
+    expect(clientCommandSchema.safeParse(command("device.register", { device })).success).toBe(true);
+    expect(clientCommandSchema.safeParse(command("device.turn.execute", {
+      turnId: "turn-1",
+      content: "Inspect the repository",
+      routing: "device",
+      chat: {
+        id: "chat-1",
+        title: "Repository",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        updatedAt: "2026-08-10T00:00:00.000Z",
+        messages: [{
+          id: "assistant-1",
+          role: "assistant",
+          content: "",
+          status: "streaming",
+          createdAt: "2026-08-10T00:00:00.000Z",
+        }],
+        toolCalls: [],
+      },
+    })).success).toBe(true);
+  });
 });

@@ -1,6 +1,7 @@
 import { authenticate } from "./auth";
 import { EvaAgent } from "./eva-agent";
 import { consumeMemoryQueue, type MemoryQueueMessage } from "./memory";
+import { PROTOCOL_VERSION } from "../../../packages/protocol/src/index";
 
 export { EvaAgent };
 export { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
@@ -9,7 +10,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/api/health") {
-      return Response.json({ ok: true, service: "eva-cloud", protocolVersion: 1 }, { headers: { "cache-control": "no-store" } });
+      return Response.json({ ok: true, service: "eva-cloud", protocolVersion: PROTOCOL_VERSION }, { headers: { "cache-control": "no-store" } });
     }
 
     if (url.pathname.startsWith("/api/")) {

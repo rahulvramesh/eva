@@ -132,6 +132,50 @@ describe("AgentServer", () => {
     expect(updated.payload.settings.thinkingLevel).toBe("off");
     expect(updated.payload.settings.systemInstructions).toBe("Be concise.");
   });
+
+  it("executes a cloud-coordinated turn on the device and streams tool provenance back", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
+    const repository = new ChatRepository(directory);
+    const server = new AgentServer({
+      host: "127.0.0.1",
+      port: 0,
+      token: "test-token",
+      repository,
+      backend: new FakeAgentBackend(),
+    });
+    const port = await server.listen();
+    cleanup.push(async () => { await server.close(); await rm(directory, { recursive: true, force: true }); });
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+    cleanup.push(async () => socket.close());
+    const events: ServerEvent[] = [];
+    socket.on("message", (data) => events.push(JSON.parse(data.toString()) as ServerEvent));
+    await waitFor(() => events.some((event) => event.type === "server.hello"));
+
+    const timestamp = "2026-08-10T00:00:00.000Z";
+    const chat: Chat = {
+      id: crypto.randomUUID(),
+      title: "Device check",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      messages: [
+        { id: "user-1", role: "user", content: "Check the command", status: "complete", createdAt: timestamp },
+        { id: "assistant-1", role: "assistant", content: "", status: "streaming", createdAt: timestamp },
+      ],
+      toolCalls: [],
+    };
+    socket.send(JSON.stringify(command("device.turn.execute", {
+      turnId: "turn-1",
+      chat,
+      content: "Check the command",
+      routing: "device",
+    })));
+    const completed = await findEvent(events, "device.turn.complete");
+    expect(completed.payload).toMatchObject({ turnId: "turn-1", chatId: chat.id, status: "complete" });
+    expect(completed.payload.content).toContain("local installation details");
+    expect(events.some((event) => event.type === "device.turn.delta")).toBe(true);
+    expect(events.some((event) => event.type === "device.turn.tool" && event.payload.toolCall.status === "complete")).toBe(true);
+    await expect(repository.get(chat.id)).rejects.toThrow();
+  });
 });
 
 async function waitFor(predicate: () => boolean, timeout = 3_000): Promise<void> {

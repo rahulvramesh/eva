@@ -364,6 +364,16 @@ button { color: inherit; }
 .theme-switch button { height: 28px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 7px; color: #777a77; background: transparent; font-size: 10px; font-weight: 650; cursor: pointer; }
 .theme-switch button.active { color: #eeeeeb; background: #343735; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045); }
 .theme-switch svg { width: 12px; height: 12px; }
+.route-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; border: 1px solid #444745; border-radius: 10px; padding: 3px; background: #181918; }
+.route-grid button { height: 30px; display: flex; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: 7px; color: #777a77; background: transparent; font-size: 9px; font-weight: 650; cursor: pointer; }
+.route-grid button.active { color: #eeeeeb; background: #343735; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045); }
+.route-grid svg { width: 11px; height: 11px; }
+.device-list { display: flex; flex-direction: column; gap: 4px; margin-top: 7px; }
+.device { display: grid; grid-template-columns: 9px minmax(0, auto) 1fr; align-items: center; gap: 5px; border: 1px solid #343735; border-radius: 8px; padding: 6px 8px; color: #777b78; background: #1b1d1c; }
+.device > svg { width: 7px; height: 7px; color: #606461; }
+.device.online > svg { color: #58bc83; filter: drop-shadow(0 0 4px rgba(88, 188, 131, .42)); }
+.device > span { color: #b7bbb8; font-size: 9px; }
+.device > small { margin: 0; overflow: hidden; text-align: right; white-space: nowrap; text-overflow: ellipsis; }
 
 .settings-footer { display: flex; align-items: center; justify-content: space-between; margin: 2px -15px -13px; border-top: 1px solid #343634; padding: 11px 15px; color: #686b68; font-size: 8.5px; }
 .settings-footer button { min-width: 67px; height: 30px; border: 0; border-radius: 9px; color: #191a19; background: #e6e7e4; font-size: 10px; font-weight: 720; cursor: pointer; }
@@ -401,6 +411,7 @@ button { color: inherit; }
 .cloud-login > img { width: 46px; height: 46px; border-radius: 13px; box-shadow: 0 9px 24px rgba(0, 0, 0, .35); }
 .cloud-login h1 { margin: 15px 0 5px; font-size: 19px; letter-spacing: -.02em; }
 .cloud-login > p { margin: 0 0 18px; color: #929893; font-size: 10px; line-height: 1.5; }
+.cloud-login > p.cloud-login-error { margin: 10px 0 0; color: #ef938e; }
 .cloud-login label { display: block; margin-top: 10px; }
 .cloud-login label span { display: block; margin-bottom: 6px; color: #9ca19d; font-size: 9px; font-weight: 680; }
 .cloud-login input { width: 100%; height: 39px; border: 1px solid #484c49; border-radius: 10px; outline: 0; padding: 0 11px; color: #edf0ed; background: #1e211f; font-size: 11px; }
@@ -489,13 +500,18 @@ button { color: inherit; }
 :root[data-theme="light"] .appearance-field small { color: #767e79; }
 :root[data-theme="light"] .select-wrap,
 :root[data-theme="light"] .settings-field textarea,
-:root[data-theme="light"] .theme-switch { border-color: rgba(55, 64, 58, .28); color: #252a27; background: rgba(255, 255, 255, .54); }
+:root[data-theme="light"] .theme-switch,
+:root[data-theme="light"] .route-grid { border-color: rgba(55, 64, 58, .28); color: #252a27; background: rgba(255, 255, 255, .54); }
 :root[data-theme="light"] .select-wrap select,
 :root[data-theme="light"] .settings-field textarea { color: #252a27; }
 :root[data-theme="light"] .select-wrap > svg:first-child { color: #515854; }
 :root[data-theme="light"] .settings-field textarea::placeholder { color: #7b817d; }
 :root[data-theme="light"] .theme-switch button { color: #68706b; }
 :root[data-theme="light"] .theme-switch button.active { color: #242925; background: rgba(255, 255, 255, .94); box-shadow: 0 1px 4px rgba(43, 52, 46, .13); }
+:root[data-theme="light"] .route-grid button { color: #68706b; }
+:root[data-theme="light"] .route-grid button.active { color: #242925; background: rgba(255, 255, 255, .94); box-shadow: 0 1px 4px rgba(43, 52, 46, .13); }
+:root[data-theme="light"] .device { border-color: rgba(55, 64, 58, .20); background: rgba(255, 255, 255, .42); }
+:root[data-theme="light"] .device > span { color: #444b47; }
 :root[data-theme="light"] .settings-footer { border-color: rgba(55, 64, 58, .16); }
 :root[data-theme="light"] .settings-footer button { color: #f7f8f6; background: #363c38; }
 :root[data-theme="light"] .settings-footer button:disabled { color: #979d99; background: rgba(59, 67, 62, .10); }

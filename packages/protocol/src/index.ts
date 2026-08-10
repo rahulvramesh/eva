@@ -1,6 +1,11 @@
 import { z } from "zod";
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
+
+export const executionHostSchema = z.enum(["cloud", "device"]);
+export type ExecutionHost = z.infer<typeof executionHostSchema>;
+export const routingPolicySchema = z.enum(["auto", "cloud", "device", "private"]);
+export type RoutingPolicy = z.infer<typeof routingPolicySchema>;
 
 export const messageSchema = z.object({
   id: z.string(),
@@ -8,6 +13,10 @@ export const messageSchema = z.object({
   content: z.string(),
   createdAt: z.string(),
   status: z.enum(["complete", "streaming", "aborted", "error"]).default("complete"),
+  executionHost: executionHostSchema.optional(),
+  deviceId: z.string().optional(),
+  model: z.string().optional(),
+  private: z.boolean().optional(),
 });
 
 export type ChatMessage = z.infer<typeof messageSchema>;
@@ -51,8 +60,24 @@ export const agentModelSchema = z.object({
   name: z.string(),
   contextWindow: z.number().int().positive().optional(),
   thinkingLevels: z.array(thinkingLevelSchema).min(1),
+  executionHost: executionHostSchema.optional(),
+  deviceId: z.string().optional(),
+  available: z.boolean().optional(),
+  localInference: z.boolean().optional(),
 });
 export type AgentModel = z.infer<typeof agentModelSchema>;
+
+export const deviceCapabilitySchema = z.object({
+  id: z.string().min(1).max(200),
+  name: z.string().min(1).max(200),
+  platform: z.string().min(1).max(50),
+  workspace: z.string().max(1_000),
+  models: z.array(agentModelSchema).max(500),
+  tools: z.array(z.string().min(1).max(100)).max(100),
+  connectedAt: z.string().optional(),
+  online: z.boolean().optional(),
+});
+export type DeviceCapability = z.infer<typeof deviceCapabilitySchema>;
 
 export const agentSettingsSchema = z.object({
   models: z.array(agentModelSchema),
@@ -92,6 +117,34 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     type: z.literal("message.send"),
     chatId: z.string(),
     content: z.string().trim().min(1).max(100_000),
+    routing: routingPolicySchema.optional(),
+  }),
+  commandBase.extend({ type: z.literal("device.register"), device: deviceCapabilitySchema }),
+  commandBase.extend({
+    type: z.literal("device.turn.execute"),
+    turnId: z.string(),
+    chat: chatSchema,
+    content: z.string().trim().min(1).max(100_000),
+    routing: routingPolicySchema,
+  }),
+  commandBase.extend({ type: z.literal("device.turn.delta"), turnId: z.string(), delta: z.string().max(100_000) }),
+  commandBase.extend({ type: z.literal("device.turn.abort"), turnId: z.string(), chatId: z.string() }),
+  commandBase.extend({ type: z.literal("device.turn.tool"), turnId: z.string(), toolCall: toolCallSchema }),
+  commandBase.extend({
+    type: z.literal("device.turn.complete"),
+    turnId: z.string(),
+    content: z.string().max(1_000_000),
+    status: z.enum(["complete", "aborted", "error"]),
+    sessionFile: z.string().optional(),
+  }),
+  commandBase.extend({
+    type: z.literal("sync.turn.push"),
+    chatId: z.string(),
+    title: z.string().min(1).max(200),
+    createdAt: z.string(),
+    userMessage: messageSchema,
+    assistantMessage: messageSchema,
+    toolCalls: z.array(toolCallSchema).max(500).default([]),
   }),
   commandBase.extend({ type: z.literal("run.abort"), chatId: z.string() }),
   commandBase.extend({ type: z.literal("tool.approve"), toolCallId: z.string() }),
@@ -125,7 +178,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 
 type EventPayloads = {
-  "server.hello": { protocolVersion: number; agentMode: "pi" | "fake" | "cloud" };
+  "server.hello": { protocolVersion: number; agentMode: "pi" | "fake" | "cloud" | "hybrid" };
   "chat.list": { chats: ChatSummary[] };
   "chat.created": { chat: Chat };
   "chat.snapshot": { chat: Chat };
@@ -139,6 +192,15 @@ type EventPayloads = {
   "memory.snapshot": { memories: Memory[] };
   "memory.updated": { memory: Memory };
   "memory.deleted": { memoryId: string };
+  "device.presence": { devices: DeviceCapability[] };
+  "device.turn.request": { turnId: string; chat: Chat; content: string; routing: RoutingPolicy };
+  "device.turn.abort": { turnId: string; chatId: string };
+  "device.settings.update": { deviceId: string; provider: string; modelId: string; thinkingLevel: ThinkingLevel; systemInstructions: string };
+  "device.turn.delta": { turnId: string; chatId: string; messageId: string; delta: string };
+  "device.turn.tool": { turnId: string; chatId: string; toolCall: ToolCall };
+  "device.turn.complete": { turnId: string; chatId: string; messageId: string; content: string; status: "complete" | "aborted" | "error" };
+  "route.status": { chatId: string; turnId: string; host: ExecutionHost; deviceId?: string; model?: string; private: boolean; status: "queued" | "running" | "complete" | "error" };
+  "sync.turn.ack": { chatId: string; assistantMessageId: string };
   "server.error": { code: string; message: string; requestId?: string };
 };
 

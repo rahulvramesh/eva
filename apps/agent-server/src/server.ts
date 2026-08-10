@@ -25,6 +25,7 @@ export class AgentServer {
   private readonly http: HttpServer;
   private readonly sockets = new Set<WebSocket>();
   private readonly running = new Map<string, { assistantId: string; content: string }>();
+  private readonly deviceTurns = new Map<string, string>();
   private sequence = 0;
 
   constructor(private readonly options: AgentServerOptions) {
@@ -111,6 +112,9 @@ export class AgentServer {
       case "run.abort":
         await this.options.backend.abort(command.chatId);
         return;
+      case "device.turn.abort":
+        if (this.deviceTurns.get(command.turnId) === command.chatId) await this.options.backend.abort(command.chatId);
+        return;
       case "settings.get":
         this.send(socket, "settings.snapshot", { settings: await this.options.backend.getSettings() });
         return;
@@ -129,6 +133,72 @@ export class AgentServer {
         if (this.running.size > 0) throw new Error("Wait for the current response or stop it first.");
         void this.runPrompt(command.chatId, command.content);
         return;
+      case "device.turn.execute":
+        if (this.deviceTurns.size > 0) throw new Error("This device is already completing another turn.");
+        void this.runDeviceTurn(socket, command.turnId, command.chat, command.content);
+        return;
+    }
+  }
+
+  private async runDeviceTurn(socket: WebSocket, turnId: string, chat: Parameters<AgentBackend["generate"]>[0], prompt: string): Promise<void> {
+    const assistant = [...chat.messages].reverse().find((message) => message.role === "assistant" && message.status === "streaming");
+    if (!assistant) throw new Error("The hybrid turn is missing its assistant message.");
+    this.deviceTurns.set(turnId, chat.id);
+    let content = "";
+    let toolQueue = Promise.resolve();
+    const toolCalls = new Map<string, ToolCall>();
+    try {
+      const result = await this.options.backend.generate(chat, prompt, (delta) => {
+        content += delta;
+        this.send(socket, "device.turn.delta", { turnId, chatId: chat.id, messageId: assistant.id, delta });
+      }, (activity) => {
+        toolQueue = toolQueue.then(async () => {
+          if (activity.phase === "start") {
+            const toolCall: ToolCall = {
+              id: activity.id,
+              assistantMessageId: assistant.id,
+              name: activity.name,
+              input: activity.input,
+              output: "",
+              status: "running",
+              createdAt: new Date().toISOString(),
+            };
+            toolCalls.set(toolCall.id, toolCall);
+            this.send(socket, "device.turn.tool", { turnId, chatId: chat.id, toolCall });
+            return;
+          }
+          const current = toolCalls.get(activity.id);
+          if (!current) return;
+          const updated: ToolCall = {
+            ...current,
+            output: activity.output,
+            status: activity.phase === "end" ? activity.isError ? "error" : "complete" : "running",
+            completedAt: activity.phase === "end" ? new Date().toISOString() : undefined,
+          };
+          toolCalls.set(updated.id, updated);
+          this.send(socket, "device.turn.tool", { turnId, chatId: chat.id, toolCall: updated });
+        });
+      });
+      await drainQueue(() => toolQueue);
+      for (const toolCall of toolCalls.values()) {
+        if (toolCall.status !== "running") continue;
+        const completed = { ...toolCall, status: "complete" as const, completedAt: new Date().toISOString() };
+        toolCalls.set(completed.id, completed);
+        this.send(socket, "device.turn.tool", { turnId, chatId: chat.id, toolCall: completed });
+      }
+      if (result.sessionFile) chat.sessionFile = result.sessionFile;
+      this.send(socket, "device.turn.complete", { turnId, chatId: chat.id, messageId: assistant.id, content, status: "complete" });
+    } catch (error) {
+      const aborted = error instanceof Error && (error.message === "ABORTED" || /abort/i.test(error.message));
+      this.send(socket, "device.turn.complete", {
+        turnId,
+        chatId: chat.id,
+        messageId: assistant.id,
+        content: content || (aborted ? "Stopped." : error instanceof Error ? error.message : "The local turn failed."),
+        status: aborted ? "aborted" : "error",
+      });
+    } finally {
+      this.deviceTurns.delete(turnId);
     }
   }
 
@@ -182,8 +252,17 @@ export class AgentServer {
           this.broadcast("tool.update", { chatId, toolCall: updated });
         }).catch((error) => { toolFailure = error; });
       });
-      await toolQueue;
+      await drainQueue(() => toolQueue);
       if (toolFailure) throw toolFailure;
+      for (const toolCall of toolCalls.values()) {
+        if (toolCall.status !== "running") continue;
+        const completed = await this.options.repository.updateToolCall(chatId, toolCall.id, {
+          status: "complete",
+          completedAt: new Date().toISOString(),
+        });
+        toolCalls.set(completed.id, completed);
+        this.broadcast("tool.update", { chatId, toolCall: completed });
+      }
       const state = this.running.get(chatId)!;
       await this.options.repository.updateMessage(chatId, state.assistantId, { content: state.content, status: "complete" });
       if (result.sessionFile && result.sessionFile !== chat.sessionFile) {
@@ -191,7 +270,7 @@ export class AgentServer {
       }
       this.broadcast("run.status", { chatId, status: "idle" });
     } catch (error) {
-      await toolQueue;
+      await drainQueue(() => toolQueue);
       const state = this.running.get(chatId);
       if (!state) return;
       const aborted = error instanceof Error && (error.message === "ABORTED" || /abort/i.test(error.message));
@@ -217,6 +296,15 @@ export class AgentServer {
 
   private broadcast<T extends ServerEventType>(type: T, payload: Extract<ServerEvent<T>, { type: T }>["payload"]): void {
     for (const socket of this.sockets) this.send(socket, type, payload);
+  }
+}
+
+async function drainQueue(currentQueue: () => Promise<void>): Promise<void> {
+  for (;;) {
+    const current = currentQueue();
+    await current;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    if (current === currentQueue()) return;
   }
 }
 
