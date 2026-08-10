@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
   Bell,
   Brain,
@@ -7,6 +9,7 @@ import {
   CaretDown,
   ChatCircleDots,
   CheckCircle,
+  Checks,
   Circle,
   Cloud,
   Code,
@@ -70,6 +73,8 @@ export function App() {
   const [error, setError] = useState<string>();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [notificationMenuOpen, setNotificationMenuOpen] = useState(false);
+  const [activePage, setActivePage] = useState<"chat" | "notifications">("chat");
   const [settings, setSettings] = useState<AgentSettings>();
   const [memories, setMemories] = useState<Memory[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
@@ -277,11 +282,25 @@ export function App() {
     const cached = chatCacheRef.current.get(chatId);
     if (cached) setActiveChat(cached);
     client.send(command("chat.open", { chatId }));
+    setActivePage("chat");
     setSidebarOpen(false);
   }
 
   function createChat(): void {
+    setActivePage("chat");
+    setNotificationMenuOpen(false);
     clientRef.current?.send(command("chat.create", {}));
+  }
+
+  function markNotificationRead(notificationId: string): void {
+    clientRef.current?.send(command("notification.read", { notificationId }));
+  }
+
+  function openNotifications(): void {
+    setActivePage("notifications");
+    setNotificationMenuOpen(false);
+    setSidebarOpen(false);
+    setSettingsOpen(false);
   }
 
   function submit(event: FormEvent): void {
@@ -316,11 +335,20 @@ export function App() {
         <button className="header-icon sidebar-toggle" onClick={() => setSidebarOpen((value) => !value)} aria-label="Toggle chats">
           <SidebarSimple weight="regular" />
         </button>
-        <button className="chat-title-pill" onClick={createChat} title="Start a new chat">
-          {activeChat?.title === "New chat" ? "New Chat" : activeChat?.title ?? "New Chat"}
+        <button className="chat-title-pill" onClick={activePage === "notifications" ? () => setActivePage("chat") : createChat} title={activePage === "notifications" ? "Back to chat" : "Start a new chat"}>
+          {activePage === "notifications" ? "Notifications" : activeChat?.title === "New chat" ? "New Chat" : activeChat?.title ?? "New Chat"}
         </button>
         <div className="header-actions">
-          <button className="header-icon notification-trigger" onClick={() => setSettingsOpen(true)} aria-label="Open reminders and notifications">
+          <button
+            className={notificationMenuOpen ? "header-icon notification-trigger active" : "header-icon notification-trigger"}
+            onClick={() => {
+              setNotificationMenuOpen((value) => !value);
+              setSettingsOpen(false);
+              setSidebarOpen(false);
+            }}
+            aria-label="Open notifications"
+            aria-expanded={notificationMenuOpen}
+          >
             <Bell weight={notifications.some((notification) => !notification.readAt) ? "fill" : "regular"} />
             {notifications.some((notification) => !notification.readAt) && <span className="notification-dot" />}
           </button>
@@ -328,6 +356,15 @@ export function App() {
           <button className="header-icon caret" onClick={() => setSidebarOpen((value) => !value)} aria-label="Show chats"><CaretDown weight="bold" /></button>
         </div>
       </header>
+
+      {notificationMenuOpen && (
+        <NotificationDropdown
+          notifications={notifications}
+          onRead={markNotificationRead}
+          onViewAll={openNotifications}
+          onClose={() => setNotificationMenuOpen(false)}
+        />
+      )}
 
       {sidebarOpen && (
         <aside className="chat-drawer">
@@ -348,7 +385,13 @@ export function App() {
         </aside>
       )}
 
-      <main className="conversation">
+      {activePage === "notifications" ? (
+        <NotificationPage
+          notifications={notifications}
+          onRead={markNotificationRead}
+          onBack={() => setActivePage("chat")}
+        />
+      ) : <main className="conversation">
           <div className="transcript" ref={transcriptRef}>
             {!activeChat?.messages.length ? <EmptyState /> : activeChat.messages.map((message) => (
               <div className="timeline-group" key={message.id}>
@@ -380,7 +423,6 @@ export function App() {
                 onSyncOfflineToolOutputChange={setSyncOfflineToolOutput}
                 memories={memories}
                 reminders={reminders}
-                notifications={notifications}
                 notificationPreferences={notificationPreferences}
                 devices={devices}
                 routing={routing}
@@ -407,7 +449,6 @@ export function App() {
                   status: reminder.status,
                 }))}
                 onReminderDelete={(reminderId) => clientRef.current?.send(command("reminder.delete", { reminderId }))}
-                onNotificationRead={(notificationId) => clientRef.current?.send(command("notification.read", { notificationId }))}
                 onNotificationPreferences={(preferences) => {
                   if (preferences.appEnabled && !window.eva && "Notification" in window && Notification.permission === "default") void Notification.requestPermission();
                   clientRef.current?.send(command("notification.preferences.update", preferences));
@@ -467,8 +508,104 @@ export function App() {
                   : agentMode === "hybrid" || agentMode === "cloud" ? "Synced with Eva Cloud" : "Browser preview"}</span>
             </div>
           </div>
-      </main>
+      </main>}
     </div>
+  );
+}
+
+function NotificationDropdown({
+  notifications,
+  onRead,
+  onViewAll,
+  onClose,
+}: {
+  notifications: EvaNotification[];
+  onRead: (notificationId: string) => void;
+  onViewAll: () => void;
+  onClose: () => void;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const unread = notifications.filter((notification) => !notification.readAt);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!panelRef.current?.contains(target) && !(target instanceof Element && target.closest(".notification-trigger"))) onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [onClose]);
+
+  return (
+    <div className="notification-dropdown" ref={panelRef} role="dialog" aria-label="Notifications">
+      <div className="notification-dropdown-heading">
+        <div><Bell weight="fill" /><span>Notifications</span></div>
+        <strong>{unread.length ? `${unread.length} new` : "All caught up"}</strong>
+      </div>
+      <div className="notification-dropdown-list">
+        {notifications.length ? notifications.slice(0, 5).map((notification) => (
+          <button
+            key={notification.id}
+            type="button"
+            className={notification.readAt ? "notification-menu-item read" : "notification-menu-item"}
+            onClick={() => { if (!notification.readAt) onRead(notification.id); }}
+          >
+            <span className="notification-menu-icon"><CalendarBlank weight="bold" /></span>
+            <span className="notification-menu-copy"><strong>{notification.title}</strong><span>{notification.body}</span><small>{relativeDate(notification.createdAt)}</small></span>
+            {!notification.readAt && <span className="notification-unread-marker" aria-label="Unread" />}
+          </button>
+        )) : (
+          <div className="notification-dropdown-empty"><CheckCircle weight="regular" /><strong>No notifications yet</strong><span>Reminder updates will appear here.</span></div>
+        )}
+      </div>
+      <button type="button" className="notification-view-all" onClick={onViewAll}>View all notifications <ArrowRight weight="bold" /></button>
+    </div>
+  );
+}
+
+function NotificationPage({ notifications, onRead, onBack }: {
+  notifications: EvaNotification[];
+  onRead: (notificationId: string) => void;
+  onBack: () => void;
+}) {
+  const [filter, setFilter] = useState<"all" | "unread">("all");
+  const unread = notifications.filter((notification) => !notification.readAt);
+  const visible = filter === "unread" ? unread : notifications;
+
+  return (
+    <main className="notification-page">
+      <div className="notification-page-header">
+        <button type="button" className="notification-back" onClick={onBack} aria-label="Back to chat"><ArrowLeft weight="bold" /></button>
+        <div><span>Inbox</span><h1>Notifications</h1><p>Reminder activity synced across your Eva devices.</p></div>
+        {unread.length > 0 && <button type="button" className="mark-all-read" onClick={() => unread.forEach((notification) => onRead(notification.id))}><Checks weight="bold" /> Mark all read</button>}
+      </div>
+      <div className="notification-page-toolbar">
+        <div className="notification-filters" role="group" aria-label="Filter notifications">
+          <button type="button" className={filter === "all" ? "active" : ""} onClick={() => setFilter("all")}>All <span>{notifications.length}</span></button>
+          <button type="button" className={filter === "unread" ? "active" : ""} onClick={() => setFilter("unread")}>Unread <span>{unread.length}</span></button>
+        </div>
+      </div>
+      <div className="notification-page-list" aria-live="polite">
+        {visible.length ? visible.map((notification) => (
+          <article key={notification.id} className={notification.readAt ? "notification-card read" : "notification-card"}>
+            <span className="notification-card-icon"><CalendarBlank weight="bold" /></span>
+            <div className="notification-card-copy">
+              <div><strong>{notification.title}</strong>{!notification.readAt && <span>New</span>}</div>
+              <p>{notification.body}</p>
+              <small>{formatNotificationDate(notification.createdAt)}{notification.reminderId ? " · Reminder" : ""}</small>
+            </div>
+            {!notification.readAt && <button type="button" onClick={() => onRead(notification.id)}><CheckCircle weight="bold" /> Mark read</button>}
+          </article>
+        )) : (
+          <div className="notification-page-empty"><CheckCircle weight="regular" /><h2>{filter === "unread" ? "You're all caught up" : "No notifications yet"}</h2><p>{filter === "unread" ? "There are no unread notifications." : "When Eva completes a reminder, it will appear here."}</p></div>
+        )}
+      </div>
+    </main>
   );
 }
 
@@ -510,7 +647,6 @@ function SettingsPopover({
   onSyncOfflineToolOutputChange,
   memories,
   reminders,
-  notifications,
   notificationPreferences,
   devices,
   routing,
@@ -521,7 +657,6 @@ function SettingsPopover({
   onReminderCreate,
   onReminderUpdate,
   onReminderDelete,
-  onNotificationRead,
   onNotificationPreferences,
   onClose,
   onApply,
@@ -536,7 +671,6 @@ function SettingsPopover({
   onSyncOfflineToolOutputChange: (sync: boolean) => void;
   memories: Memory[];
   reminders: Reminder[];
-  notifications: EvaNotification[];
   notificationPreferences: NotificationPreferences;
   devices: DeviceCapability[];
   routing: RoutingPolicy;
@@ -549,7 +683,6 @@ function SettingsPopover({
   }) => void;
   onReminderUpdate: (reminder: Reminder) => void;
   onReminderDelete: (reminderId: string) => void;
-  onNotificationRead: (notificationId: string) => void;
   onNotificationPreferences: (preferences: NotificationPreferences) => void;
   onClose: () => void;
   onApply: (settings: AgentSettings) => void;
@@ -706,12 +839,10 @@ function SettingsPopover({
 
       <ReminderSettings
         reminders={reminders}
-        notifications={notifications}
         preferences={notificationPreferences}
         onCreate={onReminderCreate}
         onUpdate={onReminderUpdate}
         onDelete={onReminderDelete}
-        onRead={onNotificationRead}
         onPreferences={onNotificationPreferences}
       />
 
@@ -765,21 +896,17 @@ function SettingsPopover({
 
 function ReminderSettings({
   reminders,
-  notifications,
   preferences,
   onCreate,
   onUpdate,
   onDelete,
-  onRead,
   onPreferences,
 }: {
   reminders: Reminder[];
-  notifications: EvaNotification[];
   preferences: NotificationPreferences;
   onCreate: (input: { title: string; notes: string; runAt: string; timezone: string; recurrence: ReminderRecurrence; appEnabled: boolean; emailEnabled: boolean }) => void;
   onUpdate: (reminder: Reminder) => void;
   onDelete: (reminderId: string) => void;
-  onRead: (notificationId: string) => void;
   onPreferences: (preferences: NotificationPreferences) => void;
 }) {
   const detectedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Jakarta";
@@ -854,16 +981,6 @@ function ReminderSettings({
         )) : <p className="memory-empty">No upcoming reminders.</p>}
       </div>
 
-      {notifications.length > 0 && (
-        <div className="notification-list">
-          <div className="memory-heading"><span>Recent notifications</span><strong>{notifications.filter((notification) => !notification.readAt).length}</strong></div>
-          {notifications.slice(0, 10).map((notification) => (
-            <button key={notification.id} type="button" className={notification.readAt ? "notification-item read" : "notification-item"} onClick={() => { if (!notification.readAt) onRead(notification.id); }}>
-              <strong>{notification.title}</strong><span>{notification.body}</span><small>{relativeDate(notification.createdAt)}</small>
-            </button>
-          ))}
-        </div>
-      )}
     </section>
   );
 }
@@ -982,6 +1099,10 @@ function relativeDate(iso: string): string {
   return date.toDateString() === today.toDateString()
     ? date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
     : date.toLocaleDateString([], { month: "short", day: "numeric" });
+}
+
+function formatNotificationDate(iso: string): string {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(iso));
 }
 
 function selectedModelName(settings: AgentSettings): string {
