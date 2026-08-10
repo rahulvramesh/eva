@@ -7,6 +7,7 @@ const token = process.env.EVA_CLOUD_TOKEN_FILE
   : process.env.EVA_CLOUD_TOKEN;
 if (!token) throw new Error("Set EVA_CLOUD_TOKEN or EVA_CLOUD_TOKEN_FILE before running the cloud E2E test.");
 const timeoutMs = Number(process.env.EVA_E2E_TIMEOUT_MS ?? 90_000);
+const skipBash = process.env.EVA_E2E_SKIP_BASH === "1";
 const bashCommand = process.env.EVA_E2E_KEEP_WORKSPACE_FILE === "1"
   ? "printf EVA_SANDBOX_OK > eva-sandbox-e2e.txt && cat eva-sandbox-e2e.txt"
   : "printf EVA_SANDBOX_OK > eva-sandbox-e2e.txt && cat eva-sandbox-e2e.txt && rm eva-sandbox-e2e.txt";
@@ -79,34 +80,94 @@ async function run() {
   );
   if (!snapshot.payload.memories.length) throw new Error("Memory snapshot was empty.");
 
+  send("chat.create");
+  const recallChat = await waitFor((event) => event.type === "chat.created" && event.payload.chat.id !== chatId, "recall chat creation");
+  received.length = 0;
+  send("message.send", {
+    chatId: recallChat.payload.chat.id,
+    content: `What exact long-term memory contains this marker: ${marker}? Reply with the full marker.`,
+    routing: "cloud",
+  });
+  await waitFor(
+    (event) => event.type === "run.status" && event.payload.chatId === recallChat.payload.chat.id && event.payload.status === "idle",
+    "immediate cross-chat memory recall",
+  );
+  const recallText = received.filter((event) => event.type === "assistant.delta").map((event) => event.payload.delta).join("");
+  if (!recallText.includes(marker)) throw new Error(`Immediate D1 memory recall failed: ${recallText}`);
+
+  send("chat.create");
+  const saveChat = await waitFor(
+    (event) => event.type === "chat.created" && ![chatId, recallChat.payload.chat.id].includes(event.payload.chat.id),
+    "memory save chat creation",
+  );
+  const saveMarker = `Eva cloud e2e saved ${Date.now()}`;
+  received.length = 0;
+  send("message.send", {
+    chatId: saveChat.payload.chat.id,
+    content: `Remember this durable project fact exactly: ${saveMarker}. Use the remember tool and confirm only after it succeeds.`,
+    routing: "cloud",
+  });
+  const savedByAgent = await waitFor(
+    (event) => event.type === "memory.updated" && event.payload.memory.content.includes(saveMarker),
+    "agent memory write",
+  );
+  await waitFor(
+    (event) => event.type === "run.status" && event.payload.chatId === saveChat.payload.chat.id && event.payload.status === "idle",
+    "verified memory receipt",
+  );
+  const saveText = received.filter((event) => event.type === "assistant.delta").map((event) => event.payload.delta).join("");
+  if (!saveText.includes("Memory saved ✓")) throw new Error(`Verified save receipt was missing: ${saveText}`);
+
   received.length = 0;
   send("message.send", { chatId, content: "Reply with exactly: EVA_CLOUD_CHAT_OK", routing: "cloud" });
   await waitFor((event) => event.type === "run.status" && event.payload.chatId === chatId && event.payload.status === "idle", "chat completion");
-  const chatText = received.filter((event) => event.type === "assistant.delta").map((event) => event.payload.delta).join("");
+  const chatDeltas = received.filter((event) => event.type === "assistant.delta");
+  const chatText = chatDeltas.map((event) => event.payload.delta).join("");
   if (!chatText.includes("EVA_CLOUD_CHAT_OK")) throw new Error(`Unexpected chat response: ${chatText}`);
+  if (chatDeltas.length < 2) throw new Error(`Workers AI response was not incrementally streamed (${chatDeltas.length} delta).`);
 
-  received.length = 0;
-  send("message.send", {
-    chatId,
-    content: `Use the bash tool now to run: ${bashCommand}. Do not answer without using the bash tool.`,
-    routing: "cloud",
-  });
-  const pending = await waitFor(
-    (event) => event.type === "tool.call" && event.payload.toolCall.name === "bash" && event.payload.toolCall.status === "pending",
-    "pending Bash approval",
-  );
-  send("tool.approve", { toolCallId: pending.payload.toolCall.id });
-  const completed = await waitFor(
-    (event) => event.type === "tool.update" && event.payload.toolCall.id === pending.payload.toolCall.id && event.payload.toolCall.status === "complete",
-    "approved Bash execution",
-  );
-  if (!completed.payload.toolCall.output.includes("EVA_SANDBOX_OK")) throw new Error(`Unexpected Bash output: ${completed.payload.toolCall.output}`);
-  await waitFor((event) => event.type === "run.status" && event.payload.chatId === chatId && event.payload.status === "idle", "post-tool completion");
+  if (!skipBash) {
+    received.length = 0;
+    send("message.send", {
+      chatId,
+      content: `Use the bash tool now to run: ${bashCommand}. Do not answer without using the bash tool.`,
+      routing: "cloud",
+    });
+    const pending = await waitFor(
+      (event) => event.type === "tool.call" && event.payload.toolCall.name === "bash" && event.payload.toolCall.status === "pending",
+      "pending Bash approval",
+    );
+    send("tool.approve", { toolCallId: pending.payload.toolCall.id });
+    const completed = await waitFor(
+      (event) => event.type === "tool.update" && event.payload.toolCall.id === pending.payload.toolCall.id && event.payload.toolCall.status === "complete",
+      "approved Bash execution",
+    );
+    if (!completed.payload.toolCall.output.includes("EVA_SANDBOX_OK")) throw new Error(`Unexpected Bash output: ${completed.payload.toolCall.output}`);
+    await waitFor((event) => event.type === "run.status" && event.payload.chatId === chatId && event.payload.status === "idle", "post-tool completion");
+  }
 
   send("memory.delete", { memoryId: memory.payload.memory.id });
   await waitFor((event) => event.type === "memory.deleted" && event.payload.memoryId === memory.payload.memory.id, "memory cleanup");
+  send("memory.delete", { memoryId: savedByAgent.payload.memory.id });
+  await waitFor(
+    (event) => event.type === "memory.deleted" && event.payload.memoryId === savedByAgent.payload.memory.id,
+    "agent memory cleanup",
+  );
 
-  console.log(JSON.stringify({ ok: true, chatId, checks: ["auth", "settings", "chat", "memory", "workers-ai", "bash-approval", "sandbox"] }));
+  console.log(JSON.stringify({
+    ok: true,
+    chatId,
+    checks: [
+      "auth",
+      "settings",
+      "chat",
+      "memory",
+      "immediate-cross-chat-recall",
+      "verified-save-receipt",
+      "workers-ai-stream",
+      ...skipBash ? [] : ["bash-approval", "sandbox"],
+    ],
+  }));
 }
 
 try {

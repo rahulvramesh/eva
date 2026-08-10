@@ -36,8 +36,15 @@ import {
   type ModelMessage,
 } from "./db";
 import { enqueueMemory, enqueueMemoryDelete, retrieveMemories } from "./memory";
+import {
+  MEMORY_SAFETY_INSTRUCTION,
+  claimsUnverifiedMemorySave,
+  explicitlyRequestsMemory,
+  isVerifiedMemoryReceipt,
+} from "./memory-policy";
 import { runBash, runWebFetch } from "./tools";
 import { isPrivateCapableModel, shouldRouteToDevice } from "./routing";
+import { consumeChatCompletionStream } from "./model-stream";
 
 type SocketAttachment = { userId: string; identity: string; device?: DeviceCapability };
 type ModelToolCall = { id: string; name: string; input: Record<string, unknown> };
@@ -544,20 +551,57 @@ export class EvaAgent extends DurableObject<Env> {
     prefix: string,
   ): Promise<void> {
     let content = prefix;
+    const memoryRequested = explicitlyRequestsMemory(messages);
+    let memoryReceipt = "";
+    let memoryRetryIssued = false;
     for (let iteration = 0; iteration < 5; iteration += 1) {
       if (this.abortRequested) throw new Error("ABORTED");
       const settings = await getSettings(this.env.DB, this.env, userId);
-      const result = await runModel(this.env, settings, messages);
-      if (result.response) {
-        content += result.response;
-        this.streamText(chatId, assistantMessageId, result.response);
-      }
+      let streamedResponse = "";
+      const shouldBufferForMemoryVerification = memoryRequested && !memoryReceipt;
+      const result = await runModel(this.env, settings, messages, (delta) => {
+        streamedResponse += delta;
+        if (!shouldBufferForMemoryVerification) {
+          content += delta;
+          this.broadcast("assistant.delta", { chatId, messageId: assistantMessageId, delta });
+        }
+      });
       const toolCalls = normalizeToolCalls(result.tool_calls);
       if (!toolCalls.length) {
+        const response = shouldBufferForMemoryVerification ? result.response ?? streamedResponse : "";
+        if (memoryRequested && !memoryReceipt) {
+          if (!memoryRetryIssued) {
+            memoryRetryIssued = true;
+            if (response) messages.push({ role: "assistant", content: response });
+            messages.push({
+              role: "system",
+              content: "The user explicitly requested durable memory, but no memory write occurred. Call the remember tool now. Do not claim success without its verified tool receipt.",
+            });
+            continue;
+          }
+          throw new Error("Eva could not verify the requested memory write, so nothing was reported as saved.");
+        }
+
+        let finalResponse = response;
+        if (!memoryReceipt && claimsUnverifiedMemorySave(finalResponse)) {
+          finalResponse = "I haven't saved that to durable memory because no memory operation completed.";
+        }
+        if (memoryReceipt && !content.includes(memoryReceipt) && !finalResponse.includes(memoryReceipt)) {
+          finalResponse = `${memoryReceipt}\n\n${finalResponse}`.trim();
+        }
+        if (finalResponse) {
+          content += finalResponse;
+          this.streamText(chatId, assistantMessageId, finalResponse);
+        }
         const finalContent = content || "I couldn’t produce a response.";
         await updateMessage(this.env.DB, userId, chatId, assistantMessageId, { content: finalContent, status: "complete" });
         this.broadcast("run.status", { chatId, status: "idle" });
         return;
+      }
+
+      if (shouldBufferForMemoryVerification && streamedResponse && !claimsUnverifiedMemorySave(streamedResponse)) {
+        content += streamedResponse;
+        this.streamText(chatId, assistantMessageId, streamedResponse);
       }
 
       for (const request of toolCalls) {
@@ -583,6 +627,7 @@ export class EvaAgent extends DurableObject<Env> {
         }
 
         const output = await this.executeAutomaticTool(userId, chatId, assistantMessageId, request, toolCall);
+        if (request.name === "remember" && isVerifiedMemoryReceipt(output)) memoryReceipt = output;
         messages.push({ role: "tool", content: output, tool_call_id: request.id });
       }
     }
@@ -611,7 +656,7 @@ export class EvaAgent extends DurableObject<Env> {
         });
         await enqueueMemory(this.env, userId, memory);
         this.broadcast("memory.updated", { memory });
-        output = `Saved memory: ${memory.content}`;
+        output = `Memory saved ✓ [${memory.id.slice(0, 8)}]: ${memory.content}`;
       } else {
         throw new Error(`Unknown tool ${request.name}.`);
       }
@@ -683,13 +728,18 @@ function buildModelMessages(settings: AgentSettings, memories: Awaited<ReturnTyp
     ? `\n\nRelevant long-term memories:\n${memories.map((memory) => `- [${memory.kind}] ${memory.content}`).join("\n")}`
     : "";
   return [
-    { role: "system", content: `${settings.systemInstructions}${memoryContext}` },
+    { role: "system", content: `${settings.systemInstructions}\n\n${MEMORY_SAFETY_INSTRUCTION}${memoryContext}` },
     ...history.slice(-40).map((message) => ({ role: message.role, content: message.content } as ModelMessage)),
   ];
 }
 
-async function runModel(env: Env, settings: AgentSettings, messages: ModelMessage[]): Promise<{ response?: string; tool_calls?: ChatCompletionMessageToolCall[] }> {
-  const input: ChatCompletionsMessagesInput = {
+async function runModel(
+  env: Env,
+  settings: AgentSettings,
+  messages: ModelMessage[],
+  onText: (delta: string) => void,
+): Promise<{ response?: string; tool_calls?: ChatCompletionMessageToolCall[] }> {
+  const input: ChatCompletionsMessagesInput & { stream: true } = {
     messages: messages.map((message): ChatCompletionMessageParam => {
       if (message.role === "system") return { role: "system", content: message.content ?? "" };
       if (message.role === "assistant") return { role: "assistant", content: message.content ?? "" };
@@ -700,23 +750,23 @@ async function runModel(env: Env, settings: AgentSettings, messages: ModelMessag
     max_tokens: 4_096,
     temperature: settings.thinkingLevel === "off" ? 0.3 : 0.5,
     reasoning_effort: settings.thinkingLevel === "off" ? null : settings.thinkingLevel === "high" ? "high" : settings.thinkingLevel === "low" ? "low" : "medium",
+    stream: true,
+    stream_options: { include_usage: true },
   };
-  const output = await withModelRetry(() => env.AI.run(env.EVA_CLOUD_MODEL, input));
-  const message = output.choices[0]?.message;
-  return { response: message?.content ?? undefined, tool_calls: message?.tool_calls };
-}
-
-async function withModelRetry<T>(operation: () => Promise<T>): Promise<T> {
-  let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    let started = false;
     try {
-      return await operation();
+      const stream = await env.AI.run(env.EVA_CLOUD_MODEL, input);
+      return await consumeChatCompletionStream(stream, (delta) => {
+        started = true;
+        onText(delta);
+      });
     } catch (error) {
-      lastError = error;
-      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 300 * (2 ** attempt)));
+      if (started || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 300 * (2 ** attempt)));
     }
   }
-  throw lastError;
+  throw new Error("Workers AI streaming failed.");
 }
 
 function normalizeToolCalls(value: ChatCompletionMessageToolCall[] | undefined): ModelToolCall[] {

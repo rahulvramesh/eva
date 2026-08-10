@@ -27,7 +27,8 @@ Eva Cloud provides the canonical synced chat and automatically discovers connect
 - a Cloudflare Worker serves the React app and authenticated API;
 - one hibernating Durable Object coordinates each user's realtime WebSocket session;
 - D1 stores chats, messages, settings, tool approvals, memories, and audit events;
-- Workers AI runs Kimi K2.6 and creates memory embeddings;
+- Workers AI runs Kimi K2.6 with true token streaming and creates memory embeddings;
+- D1 provides immediate, authoritative cross-chat recall while Vectorize adds asynchronous semantic matches;
 - Vectorize retrieves relevant long-term memories for each prompt;
 - Bash runs only after explicit approval in an isolated Sandbox container;
 - each user gets a credential-less, prefix-scoped R2 mount at `/workspace/data` so cloud Bash files survive container sleep;

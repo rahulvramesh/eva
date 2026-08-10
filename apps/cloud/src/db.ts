@@ -366,6 +366,41 @@ export async function getMemoriesByIds(db: D1Database, userId: string, ids: stri
   return result.results.map(toMemory);
 }
 
+export async function getAuthoritativeMemories(
+  db: D1Database,
+  userId: string,
+  recentSince: string,
+): Promise<Memory[]> {
+  const result = await db.prepare(`
+    SELECT id, kind, content, importance, source_chat_id, source_message_id, status,
+      created_at, updated_at, last_used_at
+    FROM memories
+    WHERE user_id = ?1 AND status = 'active'
+      AND (kind IN ('profile', 'preference', 'instruction') OR updated_at >= ?2)
+    ORDER BY
+      CASE kind
+        WHEN 'instruction' THEN 0
+        WHEN 'profile' THEN 1
+        WHEN 'preference' THEN 2
+        ELSE 3
+      END,
+      importance DESC,
+      updated_at DESC
+    LIMIT 24
+  `).bind(userId, recentSince).all<MemoryRow>();
+  return result.results.map(toMemory);
+}
+
+export async function touchMemories(db: D1Database, userId: string, ids: string[]): Promise<void> {
+  const uniqueIds = [...new Set(ids)];
+  if (!uniqueIds.length) return;
+  const placeholders = uniqueIds.map(() => "?").join(", ");
+  await db.prepare(`
+    UPDATE memories SET last_used_at = ?
+    WHERE user_id = ? AND status = 'active' AND id IN (${placeholders})
+  `).bind(new Date().toISOString(), userId, ...uniqueIds).run();
+}
+
 export async function createMemory(
   db: D1Database,
   userId: string,
