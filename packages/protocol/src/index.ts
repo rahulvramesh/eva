@@ -12,6 +12,19 @@ export const messageSchema = z.object({
 
 export type ChatMessage = z.infer<typeof messageSchema>;
 
+export const toolCallSchema = z.object({
+  id: z.string(),
+  assistantMessageId: z.string(),
+  name: z.string(),
+  input: z.record(z.string(), z.unknown()),
+  output: z.string(),
+  status: z.enum(["running", "complete", "error"]),
+  createdAt: z.string(),
+  completedAt: z.string().optional(),
+});
+
+export type ToolCall = z.infer<typeof toolCallSchema>;
+
 export const chatSummarySchema = z.object({
   id: z.string(),
   title: z.string(),
@@ -24,6 +37,7 @@ export type ChatSummary = z.infer<typeof chatSummarySchema>;
 export const chatSchema = chatSummarySchema.extend({
   sessionFile: z.string().optional(),
   messages: z.array(messageSchema),
+  toolCalls: z.array(toolCallSchema).default([]),
 });
 
 export type Chat = z.infer<typeof chatSchema>;
@@ -82,6 +96,8 @@ type EventPayloads = {
   "chat.snapshot": { chat: Chat };
   "message.append": { chatId: string; message: ChatMessage };
   "assistant.delta": { chatId: string; messageId: string; delta: string };
+  "tool.call": { chatId: string; toolCall: ToolCall };
+  "tool.update": { chatId: string; toolCall: ToolCall };
   "run.status": { chatId: string; status: "running" | "idle" | "aborted" | "error" };
   "settings.snapshot": { settings: AgentSettings };
   "settings.updated": { settings: AgentSettings };

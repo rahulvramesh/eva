@@ -8,6 +8,7 @@ import {
   type ClientCommand,
   type ServerEvent,
   type ServerEventType,
+  type ToolCall,
 } from "../../../packages/protocol/src/index.js";
 import type { AgentBackend } from "./agent-backend.js";
 import { ChatRepository } from "./chat-repository.js";
@@ -142,13 +143,47 @@ export class AgentServer {
     this.broadcast("message.append", { chatId, message: assistantMessage });
     this.broadcast("run.status", { chatId, status: "running" });
 
+    let toolQueue = Promise.resolve();
+    let toolFailure: unknown;
+    const toolCalls = new Map<string, ToolCall>();
     try {
       const result = await this.options.backend.generate(chat, content, (delta) => {
         const state = this.running.get(chatId);
         if (!state) return;
         state.content += delta;
         this.broadcast("assistant.delta", { chatId, messageId: state.assistantId, delta });
+      }, (activity) => {
+        toolQueue = toolQueue.then(async () => {
+          const state = this.running.get(chatId);
+          if (!state) return;
+          if (activity.phase === "start") {
+            const toolCall: ToolCall = {
+              id: activity.id,
+              assistantMessageId: state.assistantId,
+              name: activity.name,
+              input: activity.input,
+              output: "",
+              status: "running",
+              createdAt: new Date().toISOString(),
+            };
+            toolCalls.set(toolCall.id, toolCall);
+            await this.options.repository.appendToolCall(chatId, toolCall);
+            this.broadcast("tool.call", { chatId, toolCall });
+            return;
+          }
+          const current = toolCalls.get(activity.id);
+          if (!current) return;
+          const updated = await this.options.repository.updateToolCall(chatId, activity.id, {
+            output: activity.output,
+            status: activity.phase === "end" ? activity.isError ? "error" : "complete" : "running",
+            completedAt: activity.phase === "end" ? new Date().toISOString() : undefined,
+          });
+          toolCalls.set(updated.id, updated);
+          this.broadcast("tool.update", { chatId, toolCall: updated });
+        }).catch((error) => { toolFailure = error; });
       });
+      await toolQueue;
+      if (toolFailure) throw toolFailure;
       const state = this.running.get(chatId)!;
       await this.options.repository.updateMessage(chatId, state.assistantId, { content: state.content, status: "complete" });
       if (result.sessionFile && result.sessionFile !== chat.sessionFile) {
@@ -156,6 +191,7 @@ export class AgentServer {
       }
       this.broadcast("run.status", { chatId, status: "idle" });
     } catch (error) {
+      await toolQueue;
       const state = this.running.get(chatId);
       if (!state) return;
       const aborted = error instanceof Error && (error.message === "ABORTED" || /abort/i.test(error.message));

@@ -11,11 +11,16 @@ type SettingsUpdate = {
   systemInstructions: string;
 };
 
+export type ToolActivity =
+  | { phase: "start"; id: string; name: string; input: Record<string, unknown> }
+  | { phase: "update"; id: string; output: string }
+  | { phase: "end"; id: string; output: string; isError: boolean };
+
 export interface AgentBackend {
   readonly mode: "pi" | "fake";
   getSettings(): Promise<AgentSettings>;
   updateSettings(update: SettingsUpdate): Promise<AgentSettings>;
-  generate(chat: Chat, prompt: string, onDelta: (delta: string) => void): Promise<{ sessionFile?: string }>;
+  generate(chat: Chat, prompt: string, onDelta: (delta: string) => void, onToolActivity: (activity: ToolActivity) => void): Promise<{ sessionFile?: string }>;
   abort(chatId: string): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -50,11 +55,22 @@ export class FakeAgentBackend implements AgentBackend {
     return structuredClone(this.settings);
   }
 
-  async generate(chat: Chat, prompt: string, onDelta: (delta: string) => void): Promise<object> {
+  async generate(chat: Chat, prompt: string, onDelta: (delta: string) => void, onToolActivity: (activity: ToolActivity) => void): Promise<object> {
     const controller = new AbortController();
     this.controllers.set(chat.id, controller);
-    const response = `I’m Eva. You said: “${prompt}”`;
+    const demoTool = /\b(tool|command|installed|claude)\b/i.test(prompt);
+    const response = demoTool
+      ? "I checked the command and confirmed the local installation details."
+      : `I’m Eva. You said: “${prompt}”`;
     try {
+      if (demoTool) {
+        const id = `demo-${crypto.randomUUID()}`;
+        onToolActivity({ phase: "start", id, name: "bash", input: { command: "command -v claude && claude --version" } });
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        const output = "/Users/eva/.local/bin/claude\n2.1.222";
+        onToolActivity({ phase: "update", id, output });
+        onToolActivity({ phase: "end", id, output, isError: false });
+      }
       for (const token of response.split(/(?<=\s)/)) {
         if (controller.signal.aborted) throw new Error("ABORTED");
         onDelta(token);
@@ -87,6 +103,12 @@ type PiSession = {
 type PiEvent = {
   type: string;
   assistantMessageEvent?: { type: string; delta?: string };
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
+  partialResult?: unknown;
+  result?: unknown;
+  isError?: boolean;
 };
 
 export class PiAgentBackend implements AgentBackend {
@@ -119,11 +141,20 @@ export class PiAgentBackend implements AgentBackend {
     return structuredClone(next);
   }
 
-  async generate(chat: Chat, prompt: string, onDelta: (delta: string) => void): Promise<{ sessionFile?: string }> {
+  async generate(chat: Chat, prompt: string, onDelta: (delta: string) => void, onToolActivity: (activity: ToolActivity) => void): Promise<{ sessionFile?: string }> {
     const session = await this.getSession(chat);
     const unsubscribe = session.subscribe((event) => {
       if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
         onDelta(event.assistantMessageEvent.delta ?? "");
+      }
+      if (event.type === "tool_execution_start" && event.toolCallId && event.toolName) {
+        onToolActivity({ phase: "start", id: event.toolCallId, name: event.toolName, input: serializableRecord(event.args) });
+      }
+      if (event.type === "tool_execution_update" && event.toolCallId) {
+        onToolActivity({ phase: "update", id: event.toolCallId, output: toolOutput(event.partialResult) });
+      }
+      if (event.type === "tool_execution_end" && event.toolCallId) {
+        onToolActivity({ phase: "end", id: event.toolCallId, output: toolOutput(event.result), isError: Boolean(event.isError) });
       }
     });
     try {
@@ -232,6 +263,31 @@ export class PiAgentBackend implements AgentBackend {
       systemInstructions: settings.systemInstructions,
     }, null, 2), "utf8");
     await rename(temporary, this.settingsPath);
+  }
+}
+
+function serializableRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  try {
+    return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+function toolOutput(value: unknown): string {
+  if (value && typeof value === "object" && "content" in value && Array.isArray(value.content)) {
+    return value.content
+      .filter((item): item is { type: "text"; text: string } => Boolean(item && typeof item === "object" && item.type === "text" && typeof item.text === "string"))
+      .map((item) => item.text)
+      .join("\n")
+      .slice(0, 200_000);
+  }
+  if (typeof value === "string") return value.slice(0, 200_000);
+  try {
+    return JSON.stringify(value, null, 2).slice(0, 200_000);
+  } catch {
+    return "";
   }
 }
 

@@ -201,6 +201,7 @@ button { color: inherit; }
 .suggestion-icon.sparkle { background: #7a2d72; }
 
 .message { max-width: 720px; margin: 0 auto 27px; }
+.timeline-group { display: contents; }
 .message-label { margin-bottom: 8px; color: #777a77; font-size: 9px; font-weight: 750; text-transform: uppercase; letter-spacing: .1em; }
 .message.user { display: flex; flex-direction: column; align-items: flex-end; }
 .message.user .message-label { margin-right: 4px; }
@@ -212,6 +213,33 @@ button { color: inherit; }
 .message-body code:not(pre code) { padding: 2px 4px; border-radius: 4px; background: #2b2c2c; font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .message-status { display: inline-block; margin-top: 7px; color: #b3996c; font-size: 9px; }
 .message-status.error { color: #d47772; }
+
+.tool-call {
+  max-width: 720px;
+  margin: -8px auto 18px;
+  overflow: hidden;
+  border: 1px solid #373a38;
+  border-radius: 12px;
+  background: rgba(28, 30, 29, .72);
+}
+.tool-call summary { min-height: 42px; display: grid; grid-template-columns: 28px minmax(0, 1fr) auto 12px; align-items: center; gap: 8px; padding: 7px 10px; list-style: none; cursor: pointer; }
+.tool-call summary::-webkit-details-marker { display: none; }
+.tool-call-icon { width: 27px; height: 27px; display: grid; place-items: center; border-radius: 8px; color: #aeb5b0; background: #2d312f; }
+.tool-call-icon svg { width: 14px; height: 14px; }
+.tool-call-summary { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tool-call-summary strong { color: #c9ccc9; font-size: 10px; font-weight: 700; }
+.tool-call-summary code { overflow: hidden; color: #858b87; font: 9px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.tool-call-status { display: flex; align-items: center; gap: 4px; color: #7f8581; font-size: 8.5px; font-weight: 650; }
+.tool-call-status svg { width: 11px; height: 11px; }
+.tool-call.complete .tool-call-status { color: #699d80; }
+.tool-call.error .tool-call-status { color: #c97d76; }
+.tool-call.running .tool-call-status svg { animation: tool-pulse 1s ease-in-out infinite; }
+.tool-call-caret { width: 10px; height: 10px; color: #676c69; transition: transform 120ms ease; }
+.tool-call[open] .tool-call-caret { transform: rotate(180deg); }
+.tool-call-details { display: grid; gap: 9px; border-top: 1px solid #343735; padding: 10px; }
+.tool-call-details span { display: block; margin-bottom: 5px; color: #6f7471; font-size: 8px; font-weight: 750; text-transform: uppercase; letter-spacing: .08em; }
+.tool-call-details pre { max-height: 160px; overflow: auto; margin: 0; border-radius: 8px; padding: 9px; color: #c8cbc8; background: #181a19; font: 9.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+@keyframes tool-pulse { 50% { opacity: .35; } }
 
 .composer-wrap { position: relative; padding: 0 22px 12px; }
 .composer {
@@ -328,6 +356,8 @@ button { color: inherit; }
 
 .appearance-field { margin: 2px 0 13px; color: #969896; font-size: 10px; font-weight: 680; }
 .appearance-field > span { display: block; margin-bottom: 7px; }
+.appearance-field small { display: block; margin-top: 6px; color: #626562; font-size: 8.5px; font-weight: 500; line-height: 1.35; }
+.tool-visibility-field { margin-top: 1px; }
 .theme-switch { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; border: 1px solid #444745; border-radius: 10px; padding: 3px; background: #181918; }
 .theme-switch button { height: 28px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 7px; color: #777a77; background: transparent; font-size: 10px; font-weight: 650; cursor: pointer; }
 .theme-switch button.active { color: #eeeeeb; background: #343735; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045); }
@@ -386,6 +416,13 @@ button { color: inherit; }
 :root[data-theme="light"] .message.user .message-body { border-color: rgba(54, 63, 57, .22); background: rgba(255, 255, 255, .58); }
 :root[data-theme="light"] .message-body pre { border-color: rgba(54, 63, 57, .20); background: rgba(245, 247, 244, .72); }
 :root[data-theme="light"] .message-body code:not(pre code) { background: rgba(43, 51, 46, .08); }
+:root[data-theme="light"] .tool-call { border-color: rgba(54, 63, 57, .20); background: rgba(255, 255, 255, .46); }
+:root[data-theme="light"] .tool-call-icon { color: #4f5953; background: rgba(54, 63, 57, .09); }
+:root[data-theme="light"] .tool-call-summary strong { color: #3f4742; }
+:root[data-theme="light"] .tool-call-summary code,
+:root[data-theme="light"] .tool-call-status { color: #747d77; }
+:root[data-theme="light"] .tool-call-details { border-color: rgba(54, 63, 57, .14); }
+:root[data-theme="light"] .tool-call-details pre { color: #343b37; background: rgba(53, 62, 56, .07); }
 :root[data-theme="light"] .composer { border-color: rgba(56, 64, 59, .30); box-shadow: 0 8px 28px rgba(42, 50, 45, .12); }
 :root[data-theme="light"] .composer:focus-within { border-color: rgba(44, 53, 47, .52); box-shadow: 0 8px 30px rgba(42, 50, 45, .16), 0 0 0 3px rgba(255, 255, 255, .32); }
 :root[data-theme="light"] .composer-plus { color: #f7f8f6; background: #777e7a; }
@@ -404,6 +441,7 @@ button { color: inherit; }
 :root[data-theme="light"] .settings-footer { color: #707772; }
 :root[data-theme="light"] .settings-field,
 :root[data-theme="light"] .appearance-field { color: #5e6561; }
+:root[data-theme="light"] .appearance-field small { color: #767e79; }
 :root[data-theme="light"] .select-wrap,
 :root[data-theme="light"] .settings-field textarea,
 :root[data-theme="light"] .theme-switch { border-color: rgba(55, 64, 58, .28); color: #252a27; background: rgba(255, 255, 255, .54); }

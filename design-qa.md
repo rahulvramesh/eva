@@ -1,53 +1,49 @@
-# Eva Native Vibrancy and Appearance Design QA
+# Eva Tool-Call Timeline and Visibility Design QA
 
-- Source visual truth: `/var/folders/52/j35mntw55kb4sz70shw0f5s80000gn/T/codex-clipboard-d0fde5ac-5e42-4435-b251-11f983ed6e4a.png`
-- Packaged dark implementation: `/Users/rahulvramesh/workspace/eva/design-electron-dark.png`
-- Packaged light implementation: `/Users/rahulvramesh/workspace/eva/design-electron-light.png`
-- Browser light implementation: `/Users/rahulvramesh/workspace/eva/design-light-browser.png`
-- Combined dark comparison: `/Users/rahulvramesh/workspace/eva/design-comparison-vibrancy.png`
-- Reference pixels: 1594 × 1534; normalized reference window crop: 824 × 770
-- Packaged implementation window: 653 × 770 pixels and CSS pixels at 1× density
-- Browser viewport: 1028 × 964 CSS pixels at device scale factor 1
-- State: real packaged Electron window over macOS desktop material; settings open; Light and Dark each selected and captured
+- Source visual truth: `/var/folders/52/j35mntw55kb4sz70shw0f5s80000gn/T/codex-clipboard-d439e5e5-d0de-4dd8-9a38-47bb242b5696.png`
+- Normalized source: `/Users/rahulvramesh/workspace/eva/design-qa-reference.png`
+- Transcript implementation: `/Users/rahulvramesh/workspace/eva/design-qa-tool-calls.png`
+- Settings implementation: `/Users/rahulvramesh/workspace/eva/design-qa-settings.png`
+- Source pixels: 936 × 1072 at an inferred Retina 2× density; normalized to 468 × 536.
+- Implementation: 468 × 536 browser pixels and CSS pixels at device scale factor 1.
+- State: dark compact chat, completed shell tool call, collapsed timeline row; Assistant Settings scrolled to the persistent tool-call visibility control.
 
 ## Findings
 
-No actionable P0, P1, or P2 mismatches remain.
+No actionable P0, P1, or P2 differences remain.
 
-- Fonts and typography: The existing compact native sans-serif hierarchy is preserved in both themes. Light mode maintains readable dark text, muted metadata, and semibold control values.
-- Spacing and layout rhythm: Native vibrancy did not change frame bounds, corner radius, header geometry, composer position, settings anchoring, or persistent footer controls.
-- Colors and visual tokens: Dark mode uses a translucent charcoal tint over native `under-window` vibrancy, matching the reference's softened desktop material. Light mode uses a translucent pale material with higher-opacity raised controls. Both maintain visible borders and focus states.
-- Image quality and asset fidelity: Existing raster Eva identity and Phosphor interface icons remain sharp. No new placeholder, CSS illustration, handcrafted SVG, or simulated wallpaper was introduced.
-- Copy and content: The added `Appearance` control clearly offers `Light` and `Dark`; all model, reasoning, system-instruction, and shortcut copy remains unchanged.
+- Fonts and typography: Eva retains the source's system sans-serif chat hierarchy and monospace command treatment. The compact tool row uses a stronger action label, muted command preview, and legible semantic completion state.
+- Spacing and layout rhythm: The user prompt, tool row, and assistant response form one compact chronological group. The row aligns to the transcript width, uses the existing 12 px radius language, and does not displace the fixed composer.
+- Colors and visual tokens: The row uses Eva's existing charcoal surfaces and low-contrast borders. Completed state uses a restrained green token; Light mode has explicit corresponding surface, text, and border tokens.
+- Image quality and asset fidelity: Existing Eva raster identity remains unchanged. All tool, status, visibility, and disclosure icons use the project's Phosphor icon library; no placeholder, emoji, handcrafted SVG, or CSS illustration was introduced.
+- Copy and content: `Ran command`, command preview, `Done`, `Input`, and `Output` clearly describe the tool lifecycle. Settings uses `Tool Call Details` with explicit `Show` and `Hide` choices plus scope copy.
 
 ## Full-view comparison evidence
 
-`design-comparison-vibrancy.png` places the reference window and the packaged dark Electron capture at the same 770 px height. The window tint, rounded perimeter, low-contrast chrome, translucent composer, and subdued dark material follow the source. The implementation remains compact rather than adopting the reference's enlarged saved bounds.
+The normalized source and final transcript capture were opened together at 468 × 536. Both preserve the dark compact assistant surface, right-aligned user bubble, uppercase speaker labels, soft gray borders, and native system typography. The new tool row intentionally occupies the missing activity position between the initiating user message and Eva's final response. Dynamic assistant copy differs because the implementation capture uses deterministic QA data rather than the user's real Claude diagnostic response.
 
 ## Focused-region comparison evidence
 
-The packaged Light and Dark screenshots keep the appearance switch and settings fields readable. The final settings card is deliberately opaque above the translucent window material, preventing message text from bleeding through while preserving the layered Raycast-like effect around it.
+`design-qa-settings.png` verifies the settings control at the compact viewport. The popover remains inside the window, scrolls when its contents exceed available height, exposes both Show and Hide states, and distinguishes the instant display preference from model changes. The tool row was expanded during interaction QA to verify readable JSON input and multiline output, then captured collapsed for the final transcript comparison.
 
 ## Comparison history
 
-1. Initial native capture: `under-window` vibrancy was enabled, but the renderer tint at 82% opacity hid most of the material effect.
-2. Fix: reduced the macOS window tint to 52% opacity and made controls separately translucent; the packaged dark window now shows the native softened material.
-3. Initial light capture: the settings card remained translucent enough for chat text to bleed through, a P2 readability issue.
-4. Fix: kept the main light window at 62% opacity while making the settings card opaque. Post-fix `design-electron-light.png` shows clean field readability with the surrounding window still translucent.
+1. Initial implementation: tool events were correctly rendered and the visibility choice persisted, but the footer still said `Applies to the next message`. This was a P2 ambiguity because the display preference changes immediately.
+2. Fix: changed the footer to `Model changes apply to the next message`, changed the dialog label to `Assistant settings`, and increased command-preview contrast.
+3. Post-fix evidence: the revised compact settings capture shows the instant Show/Hide preference separately from next-message model behavior; the revised transcript capture keeps the command preview readable without competing with the assistant response.
 
 ## Interaction and runtime checks
 
-- Light and Dark buttons update their pressed accessibility state in the packaged app.
-- Electron receives the renderer theme over validated IPC and updates `nativeTheme.themeSource`.
-- Light preference survived browser reload; packaged preference survived app relaunch.
-- macOS packaged window uses `vibrancy: under-window` and `visualEffectState: active`.
-- Windows path uses Electron acrylic material; Linux/browser retain a solid safe fallback.
-- Browser console checked after theme interaction: no errors or warnings.
-- `pnpm check`: 8 tests passed, typecheck passed, production build passed.
-- `pnpm package`: unsigned arm64 macOS app created successfully.
+- Shell tool start, streaming update, completion, and persisted replay verified through the fake backend and server tests.
+- Tool row expands to show structured input and full output, then collapses cleanly.
+- Hide removes the tool row while keeping the assistant response visible.
+- Hidden preference survived a browser reload; Show restored the row immediately.
+- Compact settings popover measured 360 × 444 CSS pixels with vertical scrolling available for its 536 px content.
+- Browser console checked after send, expand, Show/Hide, theme, and reload interactions: zero errors.
+- `pnpm check`: typecheck passed, 14 tests passed, and production build passed.
 
-## Follow-up polish
+## Follow-up Polish
 
-- P3: A third `System` appearance choice could be added later if automatic OS-theme following is desired.
+- P3: Add elapsed time to completed tool rows once the backend records a reliable duration.
 
 final result: passed

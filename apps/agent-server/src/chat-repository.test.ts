@@ -30,8 +30,29 @@ describe("ChatRepository", () => {
     const list = await repository.list();
     expect(restored.title).toBe("Help me make a lightweight personal assis…");
     expect(restored.messages).toHaveLength(1);
+    expect(restored.toolCalls).toEqual([]);
     expect(list).toEqual([expect.objectContaining({ id: chat.id, title: restored.title })]);
     expect(await readFile(join(directory, "chats", `${chat.id}.json`), "utf8")).toContain(restored.title);
+  });
+
+  it("persists and updates tool calls", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "eva-repository-"));
+    cleanup.push(directory);
+    const repository = new ChatRepository(directory);
+    await repository.initialize();
+    const chat = await repository.create();
+    const id = randomUUID();
+    await repository.appendToolCall(chat.id, {
+      id,
+      assistantMessageId: randomUUID(),
+      name: "bash",
+      input: { command: "pwd" },
+      output: "",
+      status: "running",
+      createdAt: new Date().toISOString(),
+    });
+    await repository.updateToolCall(chat.id, id, { output: "/workspace", status: "complete" });
+    expect((await repository.get(chat.id)).toolCalls[0]).toMatchObject({ id, output: "/workspace", status: "complete" });
   });
 
   it("rejects unsafe chat paths", async () => {

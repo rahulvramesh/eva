@@ -5,8 +5,12 @@ import {
   CalendarBlank,
   CaretDown,
   ChatCircleDots,
+  CheckCircle,
   Circle,
   Code,
+  Eye,
+  EyeSlash,
+  GlobeHemisphereWest,
   Info,
   Moon,
   Plus,
@@ -14,6 +18,8 @@ import {
   Sparkle,
   Stop,
   Sun,
+  TerminalWindow,
+  WarningCircle,
 } from "@phosphor-icons/react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -25,6 +31,7 @@ import {
   type AgentSettings,
   type ThinkingLevel,
   type ServerEvent,
+  type ToolCall,
 } from "../../../../../packages/protocol/src/index";
 import { EvaClient } from "./eva-client";
 import evaLogo from "./assets/eva-app-icon.png";
@@ -44,6 +51,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<AgentSettings>();
   const [theme, setTheme] = useState<"light" | "dark">(() => localStorage.getItem("eva-theme") === "light" ? "light" : "dark");
+  const [showToolCalls, setShowToolCalls] = useState(() => localStorage.getItem("eva-show-tool-calls") !== "false");
 
   useEffect(() => {
     document.documentElement.dataset.platform = window.eva?.platform ?? "web";
@@ -70,9 +78,13 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
+    localStorage.setItem("eva-show-tool-calls", String(showToolCalls));
+  }, [showToolCalls]);
+
+  useEffect(() => {
     const node = transcriptRef.current;
     if (node) node.scrollTop = node.scrollHeight;
-  }, [activeChat?.messages]);
+  }, [activeChat?.messages, activeChat?.toolCalls]);
 
   function handleEvent(event: ServerEvent, client: EvaClient): void {
     switch (event.type) {
@@ -112,6 +124,19 @@ export function App() {
             messages: chat.messages.map((message) => message.id === event.payload.messageId
               ? { ...message, content: message.content + event.payload.delta }
               : message),
+          }));
+        }
+        break;
+      case "tool.call":
+        if (event.payload.chatId === activeChatRef.current) {
+          setActiveChat((chat) => chat && ({ ...chat, toolCalls: [...chat.toolCalls, event.payload.toolCall] }));
+        }
+        break;
+      case "tool.update":
+        if (event.payload.chatId === activeChatRef.current) {
+          setActiveChat((chat) => chat && ({
+            ...chat,
+            toolCalls: chat.toolCalls.map((toolCall) => toolCall.id === event.payload.toolCall.id ? event.payload.toolCall : toolCall),
           }));
         }
         break;
@@ -203,7 +228,12 @@ export function App() {
       <main className="conversation">
           <div className="transcript" ref={transcriptRef}>
             {!activeChat?.messages.length ? <EmptyState /> : activeChat.messages.map((message) => (
-              <Message key={message.id} message={message} />
+              <div className="timeline-group" key={message.id}>
+                {message.role === "assistant" && showToolCalls && activeChat.toolCalls
+                  .filter((toolCall) => toolCall.assistantMessageId === message.id)
+                  .map((toolCall) => <ToolCallRow key={toolCall.id} toolCall={toolCall} />)}
+                <Message message={message} />
+              </div>
             ))}
           </div>
 
@@ -214,6 +244,8 @@ export function App() {
                 disabled={running}
                 theme={theme}
                 onThemeChange={setTheme}
+                showToolCalls={showToolCalls}
+                onShowToolCallsChange={setShowToolCalls}
                 onClose={() => setSettingsOpen(false)}
                 onApply={(next) => {
                   clientRef.current?.send(command("settings.update", {
@@ -275,6 +307,8 @@ function SettingsPopover({
   disabled,
   theme,
   onThemeChange,
+  showToolCalls,
+  onShowToolCallsChange,
   onClose,
   onApply,
 }: {
@@ -282,6 +316,8 @@ function SettingsPopover({
   disabled: boolean;
   theme: "light" | "dark";
   onThemeChange: (theme: "light" | "dark") => void;
+  showToolCalls: boolean;
+  onShowToolCallsChange: (show: boolean) => void;
   onClose: () => void;
   onApply: (settings: AgentSettings) => void;
 }) {
@@ -310,7 +346,7 @@ function SettingsPopover({
   }, [onClose]);
 
   return (
-    <div className="settings-popover" ref={panelRef} role="dialog" aria-label="Model settings">
+    <div className="settings-popover" ref={panelRef} role="dialog" aria-label="Assistant settings">
       <div className="settings-heading">
         <div><img className="eva-settings-icon" src={evaLogo} alt="" /><span>Assistant Settings</span></div>
         <span>{draft.models.length} models</span>
@@ -379,11 +415,48 @@ function SettingsPopover({
         </div>
       </div>
 
+      <div className="appearance-field tool-visibility-field">
+        <span>Tool Call Details</span>
+        <div className="theme-switch" role="group" aria-label="Tool call details">
+          <button type="button" className={showToolCalls ? "active" : ""} onClick={() => onShowToolCallsChange(true)} aria-pressed={showToolCalls}>
+            <Eye weight="bold" /> Show
+          </button>
+          <button type="button" className={!showToolCalls ? "active" : ""} onClick={() => onShowToolCallsChange(false)} aria-pressed={!showToolCalls}>
+            <EyeSlash weight="bold" /> Hide
+          </button>
+        </div>
+        <small>Shows commands, fetched URLs, output, and completion status in the conversation.</small>
+      </div>
+
       <div className="settings-footer">
-        <span>Applies to the next message</span>
+        <span>Model changes apply to the next message</span>
         <button type="button" onClick={() => onApply(draft)} disabled={!changed || disabled}>Apply</button>
       </div>
     </div>
+  );
+}
+
+function ToolCallRow({ toolCall }: { toolCall: ToolCall }) {
+  const preview = toolCallPreview(toolCall);
+  const isWeb = toolCall.name === "web_fetch";
+  const Icon = isWeb ? GlobeHemisphereWest : TerminalWindow;
+  const StatusIcon = toolCall.status === "error" ? WarningCircle : toolCall.status === "complete" ? CheckCircle : Circle;
+  return (
+    <details className={`tool-call ${toolCall.status}`}>
+      <summary>
+        <span className="tool-call-icon"><Icon weight="bold" /></span>
+        <span className="tool-call-summary">
+          <strong>{toolCallLabel(toolCall)}</strong>
+          <code>{preview}</code>
+        </span>
+        <span className="tool-call-status"><StatusIcon weight={toolCall.status === "running" ? "fill" : "bold"} />{formatToolStatus(toolCall.status)}</span>
+        <CaretDown className="tool-call-caret" weight="bold" />
+      </summary>
+      <div className="tool-call-details">
+        <div><span>Input</span><pre>{JSON.stringify(toolCall.input, null, 2)}</pre></div>
+        <div><span>Output</span><pre>{toolCall.output || (toolCall.status === "running" ? "Waiting for output…" : "No output")}</pre></div>
+      </div>
+    </details>
   );
 }
 
@@ -415,6 +488,23 @@ function Message({ message }: { message: ChatMessage }) {
       </div>
     </article>
   );
+}
+
+function toolCallPreview(toolCall: ToolCall): string {
+  const value = toolCall.name === "bash" ? toolCall.input.command : toolCall.name === "web_fetch" ? toolCall.input.url : undefined;
+  return typeof value === "string" ? value : JSON.stringify(toolCall.input);
+}
+
+function toolCallLabel(toolCall: ToolCall): string {
+  if (toolCall.name === "bash") return "Ran command";
+  if (toolCall.name === "web_fetch") return "Fetched web page";
+  return toolCall.name.replace(/[_-]+/g, " ");
+}
+
+function formatToolStatus(status: ToolCall["status"]): string {
+  if (status === "complete") return "Done";
+  if (status === "error") return "Failed";
+  return "Running";
 }
 
 function focusWithText(value: string): void {

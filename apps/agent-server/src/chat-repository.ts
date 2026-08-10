@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Chat, ChatMessage, ChatSummary } from "../../../packages/protocol/src/index.js";
+import { chatSchema, type Chat, type ChatMessage, type ChatSummary, type ToolCall } from "../../../packages/protocol/src/index.js";
 
 type ChatIndex = { version: 1; chats: ChatSummary[] };
 
@@ -36,6 +36,7 @@ export class ChatRepository {
       createdAt: now,
       updatedAt: now,
       messages: [],
+      toolCalls: [],
     };
     await this.atomicWrite(this.chatPath(chat.id), chat);
     const index = await this.readIndex();
@@ -45,7 +46,7 @@ export class ChatRepository {
   }
 
   async get(id: string): Promise<Chat> {
-    return JSON.parse(await readFile(this.chatPath(id), "utf8")) as Chat;
+    return chatSchema.parse(JSON.parse(await readFile(this.chatPath(id), "utf8")));
   }
 
   async appendMessage(chatId: string, message: ChatMessage): Promise<Chat> {
@@ -67,6 +68,25 @@ export class ChatRepository {
     chat.updatedAt = new Date().toISOString();
     await this.save(chat);
     return chat;
+  }
+
+  async appendToolCall(chatId: string, toolCall: ToolCall): Promise<Chat> {
+    const chat = await this.get(chatId);
+    chat.toolCalls.push(toolCall);
+    chat.updatedAt = new Date().toISOString();
+    await this.save(chat);
+    return chat;
+  }
+
+  async updateToolCall(chatId: string, toolCallId: string, patch: Partial<ToolCall>): Promise<ToolCall> {
+    const chat = await this.get(chatId);
+    const index = chat.toolCalls.findIndex((toolCall) => toolCall.id === toolCallId);
+    if (index < 0) throw new Error(`Tool call ${toolCallId} was not found`);
+    const updated = { ...chat.toolCalls[index]!, ...patch };
+    chat.toolCalls[index] = updated;
+    chat.updatedAt = new Date().toISOString();
+    await this.save(chat);
+    return updated;
   }
 
   async setSessionFile(chatId: string, sessionFile: string): Promise<void> {

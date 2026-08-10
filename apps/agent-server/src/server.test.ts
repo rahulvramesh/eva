@@ -47,6 +47,38 @@ describe("AgentServer", () => {
     expect(events.filter((event) => event.type === "assistant.delta").length).toBeGreaterThan(2);
   });
 
+  it("streams and persists tool-call activity", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
+    const repository = new ChatRepository(directory);
+    const server = new AgentServer({
+      host: "127.0.0.1",
+      port: 0,
+      token: "test-token",
+      repository,
+      backend: new FakeAgentBackend(),
+    });
+    const port = await server.listen();
+    cleanup.push(async () => { await server.close(); await rm(directory, { recursive: true, force: true }); });
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+    cleanup.push(async () => socket.close());
+    const events: ServerEvent[] = [];
+    socket.on("message", (data) => events.push(JSON.parse(data.toString()) as ServerEvent));
+    await waitFor(() => events.some((event) => event.type === "server.hello"));
+    socket.send(JSON.stringify(command("chat.create", {})));
+    const chat = (await findEvent(events, "chat.created")).payload.chat;
+    socket.send(JSON.stringify(command("message.send", { chatId: chat.id, content: "Check the Claude command" })));
+    await waitFor(() => events.some((event) => event.type === "run.status" && event.payload.status === "idle"));
+    const restored = await repository.get(chat.id);
+    expect(restored.toolCalls).toEqual([expect.objectContaining({
+      name: "bash",
+      input: { command: "command -v claude && claude --version" },
+      output: expect.stringContaining("2.1.222"),
+      status: "complete",
+    })]);
+    expect(events.some((event) => event.type === "tool.call")).toBe(true);
+    expect(events.some((event) => event.type === "tool.update" && event.payload.toolCall.status === "complete")).toBe(true);
+  });
+
   it("rejects an incorrect token", async () => {
     const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
     const server = new AgentServer({

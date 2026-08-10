@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clientCommandSchema, command, PROTOCOL_VERSION } from "./index";
+import { chatSchema, clientCommandSchema, command, PROTOCOL_VERSION } from "./index";
 
 describe("protocol", () => {
   it("creates schema-valid commands", () => {
@@ -29,5 +29,16 @@ describe("protocol", () => {
       thinkingLevel: "high",
       systemInstructions: "Be concise.",
     })).success).toBe(true);
+  });
+
+  it("migrates snapshots without tool calls to an empty tool timeline", () => {
+    const chat = chatSchema.parse({
+      id: "chat-1",
+      title: "Legacy chat",
+      createdAt: "2026-08-10T00:00:00.000Z",
+      updatedAt: "2026-08-10T00:00:00.000Z",
+      messages: [],
+    });
+    expect(chat.toolCalls).toEqual([]);
   });
 });

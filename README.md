@@ -13,6 +13,7 @@ Eva is a lightweight, local-first personal assistant built as a compact Electron
 - Use the model name below the composer to choose any configured Pi model, set capability-aware reasoning effort, and add persistent system instructions.
 - Switch between persisted Light and Dark appearances from Assistant Settings.
 - Eva can run shell commands in its private workspace and fetch readable content from public web pages. Windows uses Git Bash when installed and otherwise falls back to PowerShell.
+- Tool calls appear as compact expandable transcript rows with input, output, and status. Use **Assistant Settings → Tool Call Details** to show or hide them; the preference persists locally.
 
 Eva uses the current `@earendil-works/pi-coding-agent` SDK and the Pi credentials already configured on the machine. If Pi is not configured, run `pi` in a terminal and use `/login` first.
 
