@@ -24,6 +24,7 @@ pnpm exec wrangler email sending list
 The checked-in production configuration uses:
 
 - Worker: `eva-cloud`
+- custom domain: `eva.tarx.app` in the active `tarx.app` Cloudflare zone
 - D1: `eva-cloud-production`
 - R2: `eva-workspaces-production`
 - Vectorize: `eva-memory-production`
@@ -43,6 +44,8 @@ pnpm exec wrangler queues create eva-memory-production
 ```
 
 Durable Object namespaces and the Sandbox container are created or migrated by `wrangler deploy` from `wrangler.jsonc`. Do not collapse or reorder the Durable Object migration tags; `v1` creates `EvaAgent` and `Sandbox`, while `v2` adds `ReminderScheduler`.
+
+The Worker deploy also provisions the `eva.tarx.app` Custom Domain, its DNS record, and its edge certificate. The target zone must already be active in the deploying Cloudflare account, and the hostname must not have an existing CNAME record. Change or remove the `routes` entry in `wrangler.jsonc` when redeploying under a different domain.
 
 Onboard the sending domain if it is not already listed:
 
@@ -120,6 +123,7 @@ For a completely new database, `pnpm cloud:migrate` applies every numbered file 
 pnpm cloud:deploy:dry
 pnpm cloud:deploy
 curl --fail --silent https://YOUR-WORKER.workers.dev/api/health
+curl --fail --silent https://eva.tarx.app/api/health
 EVA_CLOUD_URL=https://YOUR-WORKER.workers.dev \
   EVA_CLOUD_TOKEN_FILE=/absolute/path/to/production-token-file \
   EVA_E2E_SKIP_BASH=1 \

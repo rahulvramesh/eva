@@ -6,6 +6,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": true,
+  "routes": [
+    { "pattern": "eva.tarx.app", "custom_domain": true }
+  ],
   "vars": {
     "EVA_AUTH_MODE": "access-or-token",
     "SANDBOX_TRANSPORT": "rpc",

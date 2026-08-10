@@ -25,6 +25,8 @@ Eva uses the current `@earendil-works/pi-coding-agent` SDK and the Pi credential
 
 ## Eva Cloud
 
+Production is available at [`https://eva.tarx.app`](https://eva.tarx.app). The `workers.dev` address remains enabled as a recovery endpoint.
+
 Eva Cloud provides the canonical synced chat and automatically discovers connected Eva desktop devices:
 
 - a Cloudflare Worker serves the React app and authenticated API;
@@ -46,7 +48,7 @@ The hosted backend uses Cloudflare Workers AI. Connected desktop turns use the P
 
 ### Deploy
 
-Cloud resources are declared in `wrangler.jsonc`; D1 migrations are in `migrations/d1`.
+Cloud resources and the `eva.tarx.app` custom domain are declared in `wrangler.jsonc`; D1 migrations are in `migrations/d1`.
 
 ```bash
 pnpm install
