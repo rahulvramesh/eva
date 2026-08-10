@@ -6,6 +6,7 @@ Eva is a lightweight, local-first personal assistant built as a compact Electron
 
 - Open `release/mac-arm64/Eva.app` after running `pnpm package`.
 - Press `Command + Shift + Space` on macOS to hide or show Eva from anywhere.
+- Use the Eva menu-bar icon to show or hide the window, start a new chat, toggle Always on Top, or quit.
 - Eva stays above normal windows and follows you across macOS workspaces.
 - On macOS, Eva uses native under-window vibrancy with a translucent charcoal or light material; Windows uses an acrylic material fallback.
 - Use the sidebar button to open persisted chats, or the plus button to start a new chat.

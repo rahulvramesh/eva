@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, shell } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, shell, Tray } from "electron";
 import { fork, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { randomBytes } from "node:crypto";
@@ -11,6 +11,7 @@ type WindowState = { width: number; height: number; x?: number; y?: number };
 let mainWindow: BrowserWindow | null = null;
 let agentProcess: ChildProcess | null = null;
 let connection: ConnectionInfo | null = null;
+let tray: Tray | null = null;
 let restartCount = 0;
 let quitting = false;
 
@@ -20,6 +21,7 @@ app.whenReady().then(async () => {
   registerIpc();
   connection = await startAgentServer();
   createWindow();
+  createTray();
   registerGlobalShortcut();
 });
 
@@ -30,6 +32,8 @@ app.on("activate", () => {
 app.on("before-quit", () => {
   quitting = true;
   globalShortcut.unregisterAll();
+  tray?.destroy();
+  tray = null;
   agentProcess?.kill("SIGTERM");
 });
 
@@ -68,6 +72,8 @@ function createWindow(): void {
   mainWindow.setAlwaysOnTop(true, "floating");
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   mainWindow.on("close", saveWindowState);
+  mainWindow.on("show", updateTrayMenu);
+  mainWindow.on("hide", updateTrayMenu);
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:\/\//.test(url)) void shell.openExternal(url);
     return { action: "deny" };
@@ -86,19 +92,78 @@ function createWindow(): void {
   }
 }
 
+function createTray(): void {
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, "trayTemplate.png")
+    : join(app.getAppPath(), "build/trayTemplate.png");
+  const icon = nativeImage.createFromPath(iconPath);
+  if (icon.isEmpty()) {
+    console.warn(`Could not load Eva tray icon at ${iconPath}`);
+    return;
+  }
+  icon.setTemplateImage(process.platform === "darwin");
+  tray = new Tray(icon);
+  tray.setToolTip("Eva");
+  tray.on("click", toggleWindow);
+  updateTrayMenu();
+}
+
+function updateTrayMenu(): void {
+  if (!tray) return;
+  const visible = Boolean(mainWindow?.isVisible());
+  const alwaysOnTop = Boolean(mainWindow?.isAlwaysOnTop());
+  tray.setContextMenu(Menu.buildFromTemplate([
+    {
+      label: visible ? "Hide Eva" : "Show Eva",
+      click: toggleWindow,
+    },
+    {
+      label: "New Chat",
+      accelerator: "CommandOrControl+N",
+      click: () => {
+        showWindow();
+        mainWindow?.webContents.send("eva:new-chat");
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Always on Top",
+      type: "checkbox",
+      checked: alwaysOnTop,
+      click: (item) => {
+        mainWindow?.setAlwaysOnTop(item.checked, item.checked ? "floating" : "normal");
+        updateTrayMenu();
+      },
+    },
+    { type: "separator" },
+    {
+      label: "Quit Eva",
+      role: "quit",
+    },
+  ]));
+}
+
+function showWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (connection) createWindow();
+    return;
+  }
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function toggleWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    showWindow();
+    return;
+  }
+  if (mainWindow.isVisible()) mainWindow.hide();
+  else showWindow();
+}
+
 function registerGlobalShortcut(): void {
   const registered = globalShortcut.register("CommandOrControl+Shift+Space", () => {
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      if (connection) createWindow();
-      return;
-    }
-    if (mainWindow.isVisible()) {
-      mainWindow.hide();
-      return;
-    }
-    mainWindow.setAlwaysOnTop(true, "floating");
-    mainWindow.show();
-    mainWindow.focus();
+    toggleWindow();
   });
   if (!registered) console.warn("Could not register the Eva global shortcut");
 }

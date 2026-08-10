@@ -6,6 +6,7 @@ declare global {
       getConnection(): Promise<{ url: string; token: string }>;
       windowAction(action: "minimize" | "maximize" | "close"): void;
       setTheme(theme: "light" | "dark"): void;
+      onNewChat(listener: () => void): () => void;
       onServerError(listener: (message: string) => void): () => void;
       platform: string;
     };

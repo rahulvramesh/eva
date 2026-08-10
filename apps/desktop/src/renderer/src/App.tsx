@@ -52,11 +52,13 @@ export function App() {
     const removeEvent = client.onEvent((event) => handleEvent(event, client));
     const removeConnection = client.onConnection(setConnected);
     const removeServerError = window.eva?.onServerError(setError);
+    const removeTrayNewChat = window.eva?.onNewChat(() => client.send(command("chat.create", {})));
     void client.connect().catch((reason) => setError(reason instanceof Error ? reason.message : "Could not connect"));
     return () => {
       removeEvent();
       removeConnection();
       removeServerError?.();
+      removeTrayNewChat?.();
       client.close();
     };
   }, []);
