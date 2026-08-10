@@ -9,10 +9,9 @@ export function shouldRouteToDevice(
   preferredDeviceModel: boolean,
 ): boolean {
   if (!deviceAvailable) return false;
-  return routing === "device"
-    || routing === "private"
-    || preferredDeviceModel
-    || (routing === "auto" && DEVICE_INTENT.test(content));
+  if (routing === "cloud") return false;
+  if (routing === "device" || routing === "private") return true;
+  return preferredDeviceModel || DEVICE_INTENT.test(content);
 }
 
 export function isPrivateCapableModel(model: { localInference?: boolean } | undefined): boolean {

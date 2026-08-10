@@ -112,7 +112,7 @@ pnpm exec wrangler d1 migrations list eva-cloud-production --remote
 
 Do not commit database exports; they can contain chats, memories, email addresses and notification content.
 
-For a completely new database, `pnpm cloud:migrate` applies every numbered file in `migrations/d1` in order. Migration `0005_generative_ui.sql` adds typed UI blocks to messages with a backward-compatible empty-array default.
+For a completely new database, `pnpm cloud:migrate` applies every numbered file in `migrations/d1` in order. Migration `0005_generative_ui.sql` adds typed UI blocks to messages with a backward-compatible empty-array default. Migration `0006_background_tasks.sql` adds durable task state and task-notification history; it is additive and safe to leave in place during a Worker rollback.
 
 ## 6. Deploy and verify
 
@@ -145,6 +145,8 @@ pnpm package:windows      # Windows x64 NSIS installer
 
 Connect each desktop installation to the deployed Worker endpoint and owner token. Verify the global shortcut, tray menu, a cloud chat, a local file task, and a native reminder notification.
 
+For background-task acceptance, create a Cloud task from Task Center with the prompt `Reply exactly EVA_BACKGROUND_TASK_OK`. Confirm it moves from Queued to Running to Completed, creates a native notification, and opens a dedicated synced chat containing the marker. Then create an explicit Device task while the desktop bridge is disconnected: it must remain `Waiting for device` and start after the desktop reconnects. Cancelling an active task must leave it `Cancelled` and must not later overwrite that terminal state.
+
 For generative UI acceptance, ask Eva to present a two-option decision, submit one option, reload the chat, and confirm the card remains submitted. Also verify a plan through a connected Pi device and a cloud reminder/approval card. Invalid or unknown block JSON must never render.
 
 ## Restore and rollback
@@ -156,7 +158,7 @@ pnpm exec wrangler versions list
 pnpm exec wrangler rollback VERSION_ID
 ```
 
-The reminder migration is additive, so rolling back the Worker leaves unused reminder tables but does not damage chat data. For a full disaster recovery, create a fresh D1 database, import the protected SQL export, update `database_id`, redeploy, and run authenticated acceptance tests before switching users to the new endpoint.
+The reminder and background-task migrations are additive, so rolling back the Worker leaves unused tables but does not damage chat data. Queued task rows remain canonical in D1; redeploy the task-capable Worker and call `task.list` or reconnect a client to resume normal visibility. For a full disaster recovery, create a fresh D1 database, import the protected SQL export, update `database_id`, redeploy, and run authenticated acceptance tests before switching users to the new endpoint.
 
 R2 workspace objects and Vectorize embeddings are separate from D1. Back up R2 independently when workspace recovery matters. Vectorize can be rebuilt from active D1 memories by re-enqueuing them; D1 remains the canonical memory store.
 
@@ -166,4 +168,5 @@ R2 workspace objects and Vectorize embeddings are separate from D1. Back up R2 i
 - The email binding restricts sender addresses.
 - Reminder recipients are user-configured and are never accepted from a model tool.
 - Bash still requires approval; reminders do not bypass it.
+- Background tasks inherit the same Bash approval boundary. A task that requests Bash moves to `Waiting for approval`; rejecting it fails the task, and an offline device-only task never falls back silently to cloud execution.
 - `wrangler whoami`, health, authenticated WebSocket, D1 migrations and the reminder alarm are verified after deployment.

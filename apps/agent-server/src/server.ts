@@ -113,6 +113,12 @@ export class AgentServer {
       case "chat.open":
         this.send(socket, "chat.snapshot", { chat: await this.options.repository.get(command.chatId) });
         return;
+      case "task.list":
+        this.send(socket, "task.snapshot", { tasks: [] });
+        return;
+      case "task.create":
+      case "task.cancel":
+        throw new Error("Background tasks require an Eva Cloud connection.");
       case "run.abort":
         await this.options.backend.abort(command.chatId);
         return;

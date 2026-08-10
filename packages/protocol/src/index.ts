@@ -183,9 +183,42 @@ export const reminderSchema = z.object({
 });
 export type Reminder = z.infer<typeof reminderSchema>;
 
+export const backgroundTaskStatusSchema = z.enum([
+  "queued",
+  "running",
+  "waiting_device",
+  "waiting_approval",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type BackgroundTaskStatus = z.infer<typeof backgroundTaskStatusSchema>;
+
+export const backgroundTaskSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  prompt: z.string(),
+  chatId: z.string(),
+  sourceChatId: z.string().optional(),
+  routing: routingPolicySchema,
+  status: backgroundTaskStatusSchema,
+  progress: z.string(),
+  result: z.string().optional(),
+  error: z.string().optional(),
+  executionHost: executionHostSchema.optional(),
+  deviceId: z.string().optional(),
+  model: z.string().optional(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  startedAt: z.string().optional(),
+  completedAt: z.string().optional(),
+});
+export type BackgroundTask = z.infer<typeof backgroundTaskSchema>;
+
 export const notificationSchema = z.object({
   id: z.string(),
   reminderId: z.string().optional(),
+  taskId: z.string().optional(),
   title: z.string(),
   body: z.string(),
   createdAt: z.string(),
@@ -302,6 +335,14 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     status: reminderStatusSchema,
   }),
   commandBase.extend({ type: z.literal("reminder.delete"), reminderId: z.string() }),
+  commandBase.extend({ type: z.literal("task.list") }),
+  commandBase.extend({
+    type: z.literal("task.create"),
+    title: z.string().trim().min(1).max(200),
+    prompt: z.string().trim().min(1).max(100_000),
+    routing: routingPolicySchema.default("auto"),
+  }),
+  commandBase.extend({ type: z.literal("task.cancel"), taskId: z.string() }),
   commandBase.extend({ type: z.literal("notification.list") }),
   commandBase.extend({ type: z.literal("notification.read"), notificationId: z.string() }),
   commandBase.extend({ type: z.literal("notification.preferences.get") }),
@@ -335,6 +376,8 @@ type EventPayloads = {
   "reminder.snapshot": { reminders: Reminder[] };
   "reminder.updated": { reminder: Reminder };
   "reminder.deleted": { reminderId: string };
+  "task.snapshot": { tasks: BackgroundTask[] };
+  "task.updated": { task: BackgroundTask };
   "notification.snapshot": { notifications: EvaNotification[] };
   "notification.created": { notification: EvaNotification };
   "notification.read": { notificationId: string; readAt: string };

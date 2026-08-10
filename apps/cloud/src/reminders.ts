@@ -12,7 +12,7 @@ type ReminderRow = {
   status: ReminderStatus; created_at: string; updated_at: string; last_run_at: string | null;
 };
 type NotificationRow = {
-  id: string; reminder_id: string | null; title: string; body: string; created_at: string; read_at: string | null;
+  id: string; reminder_id: string | null; task_id?: string | null; title: string; body: string; created_at: string; read_at: string | null;
 };
 type RunRow = { id: string; app_status: string; email_status: string; attempts: number };
 
@@ -172,17 +172,21 @@ async function deliverReminder(
 
 export async function listNotifications(db: D1Database, userId: string): Promise<EvaNotification[]> {
   const result = await db.prepare(`
-    SELECT id, reminder_id, title, body, created_at, read_at FROM notifications
-    WHERE user_id = ?1 ORDER BY created_at DESC LIMIT 100
+    SELECT id, reminder_id, NULL AS task_id, title, body, created_at, read_at FROM notifications WHERE user_id = ?1
+    UNION ALL
+    SELECT id, NULL AS reminder_id, task_id, title, body, created_at, read_at FROM task_notifications WHERE user_id = ?1
+    ORDER BY created_at DESC LIMIT 100
   `).bind(userId).all<NotificationRow>();
   return result.results.map(toNotification);
 }
 
 export async function markNotificationRead(db: D1Database, userId: string, id: string): Promise<string> {
   const readAt = new Date().toISOString();
-  const result = await db.prepare("UPDATE notifications SET read_at = COALESCE(read_at, ?1) WHERE id = ?2 AND user_id = ?3")
-    .bind(readAt, id, userId).run();
-  if (!result.meta.changes) throw new Error("Notification not found.");
+  const results = await db.batch([
+    db.prepare("UPDATE notifications SET read_at = COALESCE(read_at, ?1) WHERE id = ?2 AND user_id = ?3").bind(readAt, id, userId),
+    db.prepare("UPDATE task_notifications SET read_at = COALESCE(read_at, ?1) WHERE id = ?2 AND user_id = ?3").bind(readAt, id, userId),
+  ]);
+  if (!results[0]?.meta.changes && !results[1]?.meta.changes) throw new Error("Notification not found.");
   return readAt;
 }
 
@@ -300,7 +304,7 @@ function toReminder(row: ReminderRow): Reminder {
 }
 
 function toNotification(row: NotificationRow): EvaNotification {
-  return { id: row.id, reminderId: row.reminder_id ?? undefined, title: row.title, body: row.body, createdAt: row.created_at, readAt: row.read_at ?? undefined };
+  return { id: row.id, reminderId: row.reminder_id ?? undefined, taskId: row.task_id ?? undefined, title: row.title, body: row.body, createdAt: row.created_at, readAt: row.read_at ?? undefined };
 }
 
 function escapeHtml(value: string): string {

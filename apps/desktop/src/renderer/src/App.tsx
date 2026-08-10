@@ -20,6 +20,7 @@ import {
   Info,
   Moon,
   Envelope,
+  ListChecks,
   Plus,
   SidebarSimple,
   Sparkle,
@@ -38,6 +39,7 @@ import {
   type ChatMessage,
   type ChatSummary,
   type AgentSettings,
+  type BackgroundTask,
   type DeviceCapability,
   type Memory,
   type MemoryKind,
@@ -78,10 +80,11 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notificationMenuOpen, setNotificationMenuOpen] = useState(false);
-  const [activePage, setActivePage] = useState<"chat" | "notifications">("chat");
+  const [activePage, setActivePage] = useState<"chat" | "notifications" | "tasks">("chat");
   const [settings, setSettings] = useState<AgentSettings>();
   const [memories, setMemories] = useState<Memory[]>([]);
   const [reminders, setReminders] = useState<Reminder[]>([]);
+  const [tasks, setTasks] = useState<BackgroundTask[]>([]);
   const [notifications, setNotifications] = useState<EvaNotification[]>([]);
   const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>({
     email: "",
@@ -260,6 +263,12 @@ export function App() {
       case "reminder.deleted":
         setReminders((current) => current.filter((reminder) => reminder.id !== event.payload.reminderId));
         break;
+      case "task.snapshot":
+        setTasks(event.payload.tasks);
+        break;
+      case "task.updated":
+        setTasks((current) => [event.payload.task, ...current.filter((task) => task.id !== event.payload.task.id)]);
+        break;
       case "notification.snapshot":
         setNotifications(event.payload.notifications);
         break;
@@ -317,6 +326,13 @@ export function App() {
 
   function openNotifications(): void {
     setActivePage("notifications");
+    setNotificationMenuOpen(false);
+    setSidebarOpen(false);
+    setSettingsOpen(false);
+  }
+
+  function openTasks(): void {
+    setActivePage("tasks");
     setNotificationMenuOpen(false);
     setSidebarOpen(false);
     setSettingsOpen(false);
@@ -421,10 +437,18 @@ export function App() {
         <button className="header-icon sidebar-toggle" onClick={() => setSidebarOpen((value) => !value)} aria-label="Toggle chats">
           <SidebarSimple weight="regular" />
         </button>
-        <button className="chat-title-pill" onClick={activePage === "notifications" ? () => setActivePage("chat") : createChat} title={activePage === "notifications" ? "Back to chat" : "Start a new chat"}>
-          {activePage === "notifications" ? "Notifications" : activeChat?.title === "New chat" ? "New Chat" : activeChat?.title ?? "New Chat"}
+        <button className="chat-title-pill" onClick={activePage !== "chat" ? () => setActivePage("chat") : createChat} title={activePage !== "chat" ? "Back to chat" : "Start a new chat"}>
+          {activePage === "notifications" ? "Notifications" : activePage === "tasks" ? "Tasks" : activeChat?.title === "New chat" ? "New Chat" : activeChat?.title ?? "New Chat"}
         </button>
         <div className="header-actions">
+          <button
+            className={activePage === "tasks" ? "header-icon active" : "header-icon"}
+            onClick={openTasks}
+            aria-label="Open background tasks"
+            title="Background tasks"
+          >
+            <ListChecks weight={tasks.some((task) => ["queued", "running", "waiting_device", "waiting_approval"].includes(task.status)) ? "fill" : "regular"} />
+          </button>
           <button
             className={notificationMenuOpen ? "header-icon notification-trigger active" : "header-icon notification-trigger"}
             onClick={() => {
@@ -476,6 +500,14 @@ export function App() {
           notifications={notifications}
           onRead={markNotificationRead}
           onBack={() => setActivePage("chat")}
+        />
+      ) : activePage === "tasks" ? (
+        <TaskPage
+          tasks={tasks}
+          connected={connected}
+          onCreate={(title, prompt, taskRouting) => clientRef.current?.send(command("task.create", { title, prompt, routing: taskRouting }))}
+          onCancel={(taskId) => clientRef.current?.send(command("task.cancel", { taskId }))}
+          onOpenChat={(chatId) => openChat(chatId)}
         />
       ) : <main className="conversation">
           <div className="transcript" ref={transcriptRef}>
@@ -612,12 +644,12 @@ function NotificationDropdown({
             className={notification.readAt ? "notification-menu-item read" : "notification-menu-item"}
             onClick={() => { if (!notification.readAt) onRead(notification.id); }}
           >
-            <span className="notification-menu-icon"><CalendarBlank weight="bold" /></span>
+            <span className="notification-menu-icon">{notification.taskId ? <ListChecks weight="bold" /> : <CalendarBlank weight="bold" />}</span>
             <span className="notification-menu-copy"><strong>{notification.title}</strong><span>{notification.body}</span><small>{relativeDate(notification.createdAt)}</small></span>
             {!notification.readAt && <span className="notification-unread-marker" aria-label="Unread" />}
           </button>
         )) : (
-          <div className="notification-dropdown-empty"><CheckCircle weight="regular" /><strong>No notifications yet</strong><span>Reminder updates will appear here.</span></div>
+          <div className="notification-dropdown-empty"><CheckCircle weight="regular" /><strong>No notifications yet</strong><span>Reminder and task updates will appear here.</span></div>
         )}
       </div>
       <button type="button" className="notification-view-all" onClick={onViewAll}>View all notifications <ArrowRight weight="bold" /></button>
@@ -638,7 +670,7 @@ function NotificationPage({ notifications, onRead, onBack }: {
     <main className="notification-page">
       <div className="notification-page-header">
         <button type="button" className="notification-back" onClick={onBack} aria-label="Back to chat"><ArrowLeft weight="bold" /></button>
-        <div><span>Inbox</span><h1>Notifications</h1><p>Reminder activity synced across your Eva devices.</p></div>
+        <div><span>Inbox</span><h1>Notifications</h1><p>Reminder and background-task activity synced across your Eva devices.</p></div>
         {unread.length > 0 && <button type="button" className="mark-all-read" onClick={() => unread.forEach((notification) => onRead(notification.id))}><Checks weight="bold" /> Mark all read</button>}
       </div>
       <div className="notification-page-toolbar">
@@ -650,16 +682,77 @@ function NotificationPage({ notifications, onRead, onBack }: {
       <div className="notification-page-list" aria-live="polite">
         {visible.length ? visible.map((notification) => (
           <article key={notification.id} className={notification.readAt ? "notification-card read" : "notification-card"}>
-            <span className="notification-card-icon"><CalendarBlank weight="bold" /></span>
+            <span className="notification-card-icon">{notification.taskId ? <ListChecks weight="bold" /> : <CalendarBlank weight="bold" />}</span>
             <div className="notification-card-copy">
               <div><strong>{notification.title}</strong>{!notification.readAt && <span>New</span>}</div>
               <p>{notification.body}</p>
-              <small>{formatNotificationDate(notification.createdAt)}{notification.reminderId ? " · Reminder" : ""}</small>
+              <small>{formatNotificationDate(notification.createdAt)}{notification.reminderId ? " · Reminder" : notification.taskId ? " · Background task" : ""}</small>
             </div>
             {!notification.readAt && <button type="button" onClick={() => onRead(notification.id)}><CheckCircle weight="bold" /> Mark read</button>}
           </article>
         )) : (
-          <div className="notification-page-empty"><CheckCircle weight="regular" /><h2>{filter === "unread" ? "You're all caught up" : "No notifications yet"}</h2><p>{filter === "unread" ? "There are no unread notifications." : "When Eva completes a reminder, it will appear here."}</p></div>
+          <div className="notification-page-empty"><CheckCircle weight="regular" /><h2>{filter === "unread" ? "You're all caught up" : "No notifications yet"}</h2><p>{filter === "unread" ? "There are no unread notifications." : "When Eva completes a reminder or background task, it will appear here."}</p></div>
+        )}
+      </div>
+    </main>
+  );
+}
+
+function TaskPage({ tasks, connected, onCreate, onCancel, onOpenChat }: {
+  tasks: BackgroundTask[];
+  connected: boolean;
+  onCreate: (title: string, prompt: string, routing: RoutingPolicy) => void;
+  onCancel: (taskId: string) => void;
+  onOpenChat: (chatId: string) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [taskRouting, setTaskRouting] = useState<RoutingPolicy>("auto");
+  const active = tasks.filter((task) => !["completed", "failed", "cancelled"].includes(task.status));
+
+  return (
+    <main className="task-page">
+      <div className="task-page-header">
+        <div><span>Background work</span><h1>Task Center</h1><p>Durable jobs keep running in Eva Cloud, or wait for your device when local access is required.</p></div>
+        <strong>{active.length ? `${active.length} active` : "Idle"}</strong>
+      </div>
+      <form className="task-create" onSubmit={(event) => {
+        event.preventDefault();
+        if (!title.trim() || !prompt.trim()) return;
+        onCreate(title.trim(), prompt.trim(), taskRouting);
+        setTitle("");
+        setPrompt("");
+      }}>
+        <div><span>New background task</span><small>Eva creates a dedicated synced chat for the result.</small></div>
+        <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Task title" maxLength={200} disabled={!connected} />
+        <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="What should Eva complete?" rows={3} disabled={!connected} />
+        <div className="task-create-actions">
+          <select value={taskRouting} onChange={(event) => setTaskRouting(event.target.value as RoutingPolicy)} disabled={!connected}>
+            <option value="auto">Auto</option><option value="cloud">Cloud</option><option value="device">Device</option><option value="private">Private</option>
+          </select>
+          <button type="submit" disabled={!connected || !title.trim() || !prompt.trim()}><Plus weight="bold" /> Start task</button>
+        </div>
+      </form>
+      <div className="task-list" aria-live="polite">
+        {tasks.length ? tasks.map((task) => {
+          const canCancel = !["completed", "failed", "cancelled"].includes(task.status);
+          return (
+            <article key={task.id} className={`task-card status-${task.status}`}>
+              <div className="task-card-top">
+                <span className="task-card-icon"><ListChecks weight="bold" /></span>
+                <div><strong>{task.title}</strong><p>{task.prompt}</p></div>
+                <span className="task-status">{formatTaskStatus(task.status)}</span>
+              </div>
+              <div className="task-progress"><span>{task.progress}</span><small>{task.executionHost ? `${task.executionHost} · ` : ""}{relativeDate(task.updatedAt)}</small></div>
+              {task.error && <p className="task-error">{task.error}</p>}
+              <div className="task-card-actions">
+                <button type="button" onClick={() => onOpenChat(task.chatId)}><ChatCircleDots weight="bold" /> Open chat</button>
+                {canCancel && <button type="button" className="danger" onClick={() => onCancel(task.id)}><X weight="bold" /> Cancel</button>}
+              </div>
+            </article>
+          );
+        }) : (
+          <div className="task-empty"><ListChecks weight="regular" /><h2>No background tasks yet</h2><p>Ask Eva to “run this in the background,” or create one above.</p></div>
         )}
       </div>
     </main>
@@ -1063,6 +1156,12 @@ function formatToolStatus(status: ToolCall["status"]): string {
   if (status === "pending") return "Approval needed";
   if (status === "rejected") return "Rejected";
   return "Running";
+}
+
+function formatTaskStatus(status: BackgroundTask["status"]): string {
+  if (status === "waiting_device") return "Waiting for device";
+  if (status === "waiting_approval") return "Approval needed";
+  return status[0]!.toUpperCase() + status.slice(1);
 }
 
 function focusWithText(value: string): void {

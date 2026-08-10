@@ -10,6 +10,7 @@ describe("hybrid routing", () => {
 
   it("honors explicit host choices and a selected Pi device model", () => {
     expect(shouldRouteToDevice("cloud", "Run bash", true, false)).toBe(false);
+    expect(shouldRouteToDevice("cloud", "Run bash", true, true)).toBe(false);
     expect(shouldRouteToDevice("device", "Hello", true, false)).toBe(true);
     expect(shouldRouteToDevice("auto", "Hello", true, true)).toBe(true);
   });

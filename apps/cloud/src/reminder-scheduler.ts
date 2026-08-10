@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { listReminders, nextReminderTime, processDueReminders } from "./reminders";
+import { nextBackgroundTaskTime } from "./background-tasks";
 
 export class ReminderScheduler extends DurableObject<Env> {
   async refresh(userId: string): Promise<void> {
@@ -13,6 +14,7 @@ export class ReminderScheduler extends DurableObject<Env> {
     try {
       const agent = this.env.EVA_AGENT.getByName(userId);
       await processDueReminders(this.env, userId, async (notification) => agent.notify(notification));
+      await agent.processBackgroundTask(userId);
       await agent.syncReminders(await listReminders(this.env.DB, userId));
     } catch (error) {
       console.error(JSON.stringify({ event: "reminder.delivery.failed", userId: userId.slice(0, 12), error: error instanceof Error ? error.message : "Unknown error" }));
@@ -23,11 +25,15 @@ export class ReminderScheduler extends DurableObject<Env> {
   }
 
   private async scheduleNext(userId: string, minimumDelay: number): Promise<void> {
-    const next = await nextReminderTime(this.env.DB, userId);
-    if (next === null) {
+    const [reminderTime, taskTime] = await Promise.all([
+      nextReminderTime(this.env.DB, userId),
+      nextBackgroundTaskTime(this.env.DB, userId),
+    ]);
+    const candidates = [reminderTime, taskTime].filter((value): value is number => value !== null);
+    if (!candidates.length) {
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    await this.ctx.storage.setAlarm(Math.max(next, Date.now() + minimumDelay));
+    await this.ctx.storage.setAlarm(Math.max(Math.min(...candidates), Date.now() + minimumDelay));
   }
 }

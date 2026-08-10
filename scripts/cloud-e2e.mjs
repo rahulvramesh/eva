@@ -126,6 +126,37 @@ async function run() {
   if (!chatText.includes("EVA_CLOUD_CHAT_OK")) throw new Error(`Unexpected chat response: ${chatText}`);
   if (chatDeltas.length < 2) throw new Error(`Workers AI response was not incrementally streamed (${chatDeltas.length} delta).`);
 
+  const taskTitle = `Eva background e2e ${Date.now()}`;
+  received.length = 0;
+  send("task.create", {
+    title: taskTitle,
+    prompt: "Reply with exactly: EVA_BACKGROUND_TASK_OK",
+    routing: "cloud",
+  });
+  const queuedTask = await waitFor(
+    (event) => event.type === "task.updated" && event.payload.task.title === taskTitle,
+    "background task creation",
+  );
+  const completedTask = await waitFor(
+    (event) => event.type === "task.updated" && event.payload.task.id === queuedTask.payload.task.id && event.payload.task.status === "completed",
+    "durable background task completion",
+  );
+  if (!completedTask.payload.task.result.includes("EVA_BACKGROUND_TASK_OK")) throw new Error(`Unexpected task result: ${completedTask.payload.task.result}`);
+  const taskNotification = await waitFor(
+    (event) => event.type === "notification.created" && event.payload.notification.taskId === completedTask.payload.task.id,
+    "background task notification",
+  );
+  send("task.list");
+  await waitFor(
+    (event) => event.type === "task.snapshot" && event.payload.tasks.some((task) => task.id === completedTask.payload.task.id && task.status === "completed"),
+    "persisted background task snapshot",
+  );
+  send("notification.read", { notificationId: taskNotification.payload.notification.id });
+  await waitFor(
+    (event) => event.type === "notification.read" && event.payload.notificationId === taskNotification.payload.notification.id,
+    "background task notification read receipt",
+  );
+
   received.length = 0;
   send("message.send", {
     chatId,
@@ -260,6 +291,8 @@ async function run() {
       "immediate-cross-chat-recall",
       "verified-save-receipt",
       "workers-ai-stream",
+      "durable-background-task",
+      "background-task-notification",
       "concurrent-chats",
       "scoped-abort",
       "durable-reminder-alarm",

@@ -5,6 +5,7 @@ import {
   clientCommandSchema,
   uiBlockSchema,
   type AgentSettings,
+  type BackgroundTask,
   type ChatMessage,
   type ClientCommand,
   type DeviceCapability,
@@ -62,6 +63,16 @@ import {
   updateNotificationPreferences,
   updateReminder,
 } from "./reminders";
+import {
+  createBackgroundTask,
+  createTaskNotification,
+  findBackgroundTaskByChat,
+  getBackgroundTask,
+  getRunnableBackgroundTask,
+  hasPendingApproval,
+  listBackgroundTasks,
+  updateBackgroundTask,
+} from "./background-tasks";
 
 type SocketAttachment = { userId: string; identity: string; device?: DeviceCapability };
 type ModelToolCall = { id: string; name: string; input: Record<string, unknown> };
@@ -73,6 +84,7 @@ type PendingDeviceTurn = {
   deviceId: string;
   private: boolean;
   expiresAt: number;
+  taskId?: string;
 };
 type PreferredDeviceModel = { deviceId: string; provider: string; modelId: string; thinkingLevel: AgentSettings["thinkingLevel"]; systemInstructions: string };
 
@@ -95,8 +107,29 @@ const scheduleReminderInputSchema = z.object({
 const presentPlanInputSchema = z.object({ title: z.string().min(1).max(200), steps: z.array(z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(500), status: z.enum(["pending", "running", "complete", "error"]).default("pending") })).min(1).max(20) });
 const presentChoiceInputSchema = z.object({ question: z.string().min(1).max(1_000), options: z.array(z.object({ id: z.string().min(1).max(100), label: z.string().min(1).max(300), description: z.string().max(1_000).optional() })).min(2).max(10), allowMultiple: z.boolean().default(false) });
 const presentTableInputSchema = z.object({ title: z.string().max(200).optional(), columns: z.array(z.object({ key: z.string().min(1).max(100), label: z.string().min(1).max(200) })).min(1).max(12), rows: z.array(z.record(z.string(), z.union([z.string().max(4_000), z.number(), z.boolean(), z.null()]))).max(100), caption: z.string().max(1_000).optional() });
+const backgroundTaskInputSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  prompt: z.string().trim().min(1).max(100_000),
+  routing: z.enum(["auto", "cloud", "device", "private"]).default("auto"),
+});
 
 const MODEL_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "start_background_task",
+      description: "Start an independent durable task when the user asks Eva to work in the background or continue separately. The task gets its own chat, survives disconnects, and reports completion in Eva.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short task title." },
+          prompt: { type: "string", description: "A self-contained instruction with all context needed to complete the task." },
+          routing: { type: "string", enum: ["auto", "cloud", "device", "private"], description: "Use cloud for cloud-only execution, device for local files/tools, private for on-device inference, or auto." },
+        },
+        required: ["title", "prompt", "routing"],
+      },
+    },
+  },
   {
     type: "function",
     function: {
@@ -384,6 +417,31 @@ export class EvaAgent extends DurableObject<Env> {
         this.broadcast("reminder.deleted", { reminderId: command.reminderId });
         this.broadcast("notification.snapshot", { notifications: await listNotifications(this.env.DB, userId) });
         return;
+      case "task.list":
+        this.send(socket, "task.snapshot", { tasks: await listBackgroundTasks(this.env.DB, userId) });
+        return;
+      case "task.create": {
+        const task = await this.createAndScheduleBackgroundTask(userId, {
+          title: command.title,
+          prompt: command.prompt,
+          routing: command.routing,
+        });
+        this.broadcast("task.updated", { task });
+        return;
+      }
+      case "task.cancel": {
+        const existing = await getBackgroundTask(this.env.DB, userId, command.taskId);
+        this.runs.requestAbort(existing.chatId);
+        await this.abortDeviceTurn(existing.chatId);
+        const task = await updateBackgroundTask(this.env.DB, userId, existing.id, {
+          status: "cancelled",
+          progress: "Cancelled",
+        });
+        await audit(this.env.DB, userId, "task.cancelled", task.id);
+        this.broadcast("task.updated", { task });
+        await this.env.REMINDER_SCHEDULER.getByName(userId).refresh(userId);
+        return;
+      }
       case "notification.list":
         this.send(socket, "notification.snapshot", { notifications: await listNotifications(this.env.DB, userId) });
         return;
@@ -430,6 +488,7 @@ export class EvaAgent extends DurableObject<Env> {
         socket.serializeAttachment({ ...attachment, device } satisfies SocketAttachment);
         this.broadcast("device.presence", { devices: this.connectedDevices() });
         this.broadcast("settings.updated", { settings: await this.hybridSettings(userId) });
+        await this.env.REMINDER_SCHEDULER.getByName(userId).refresh(userId);
         return;
       }
       case "device.turn.delta":
@@ -454,7 +513,7 @@ export class EvaAgent extends DurableObject<Env> {
     }
   }
 
-  private async routePrompt(userId: string, chatId: string, content: string, routing: RoutingPolicy): Promise<void> {
+  private async routePrompt(userId: string, chatId: string, content: string, routing: RoutingPolicy, taskId?: string): Promise<void> {
     const preferred = await this.ctx.storage.get<PreferredDeviceModel>("preferred-device-model");
     const requestedDevice = preferred ? this.connectedDevices().find((device) => device.id === preferred.deviceId) : undefined;
     const device = requestedDevice ?? this.connectedDevices()[0];
@@ -467,7 +526,7 @@ export class EvaAgent extends DurableObject<Env> {
           : device.models.find((candidate) => candidate.available !== false);
         if (!isPrivateCapableModel(model)) throw new Error("Private mode requires an on-device model such as Ollama. The selected Pi model uses a remote provider.");
       }
-      await this.runDevicePrompt(userId, chatId, content, routing, device, effectivePreferred);
+      await this.runDevicePrompt(userId, chatId, content, routing, device, effectivePreferred, taskId);
       return;
     }
     if ((routing === "device" || routing === "private") && !device) throw new Error("Your Eva desktop device is offline.");
@@ -495,6 +554,7 @@ export class EvaAgent extends DurableObject<Env> {
     routing: RoutingPolicy,
     device: DeviceCapability,
     preferred?: PreferredDeviceModel,
+    taskId?: string,
   ): Promise<void> {
     const turnId = crypto.randomUUID();
     try {
@@ -512,6 +572,7 @@ export class EvaAgent extends DurableObject<Env> {
         deviceId: device.id,
         private: routing === "private",
         expiresAt: Date.now() + 5 * 60_000,
+        taskId,
       };
       await this.ctx.storage.put(`device-turn:${turnId}`, pending);
       await this.scheduleDeviceAlarm();
@@ -536,7 +597,10 @@ export class EvaAgent extends DurableObject<Env> {
       if (!delivered) throw new Error("The selected Eva desktop disconnected before the turn started.");
     } catch (error) {
       const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${turnId}`);
-      if (pending) await this.failDeviceTurn(pending, errorMessage(error));
+      if (pending) {
+        await this.failDeviceTurn(pending, errorMessage(error));
+        if (pending.taskId) return;
+      }
       else {
         this.runs.finish(chatId);
         await this.ctx.storage.delete([`device-turn:${turnId}`, `active-device-turn:${chatId}`]);
@@ -591,6 +655,7 @@ export class EvaAgent extends DurableObject<Env> {
       status: status === "complete" ? "complete" : "error",
     });
     this.broadcast("chat.list", { chats: await listChats(this.env.DB, pending.userId) });
+    if (pending.taskId) await this.finalizeBackgroundTaskForChat(pending.userId, pending.chatId);
   }
 
   private async authorizeDeviceTurn(socket: WebSocket, turnId: string): Promise<PendingDeviceTurn> {
@@ -634,6 +699,16 @@ export class EvaAgent extends DurableObject<Env> {
       status: "error",
     });
     this.broadcast("chat.list", { chats: await listChats(this.env.DB, pending.userId) });
+    if (pending.taskId) {
+      const waiting = await updateBackgroundTask(this.env.DB, pending.userId, pending.taskId, {
+        status: "waiting_device",
+        progress: "Device disconnected; waiting to retry",
+        error: message,
+        retryAt: new Date(Date.now() + 30_000).toISOString(),
+      });
+      this.broadcast("task.updated", { task: waiting });
+      await this.env.REMINDER_SCHEDULER.getByName(pending.userId).refresh(pending.userId);
+    }
   }
 
   async alarm(): Promise<void> {
@@ -895,6 +970,16 @@ export class EvaAgent extends DurableObject<Env> {
           ? " Email delivery is requested but must be enabled with an address in Settings."
           : "";
         output = `Reminder scheduled ✓ [${reminder.id.slice(0, 8)}] for ${reminder.runAt} (${reminder.timezone}).${emailNote}`;
+      } else if (request.name === "start_background_task") {
+        const input = backgroundTaskInputSchema.parse(request.input);
+        const task = await this.createAndScheduleBackgroundTask(userId, {
+          title: input.title,
+          prompt: input.prompt,
+          routing: input.routing,
+          sourceChatId: chatId,
+        });
+        this.broadcast("task.updated", { task });
+        output = `Background task queued ✓ [${task.id.slice(0, 8)}]: ${task.title}.`;
       } else if (request.name === "list_reminders") {
         const reminders = await listReminders(this.env.DB, userId);
         output = reminders.length
@@ -962,6 +1047,7 @@ export class EvaAgent extends DurableObject<Env> {
       this.broadcast("run.status", { chatId: approval.chatId, status: "error" });
     } finally {
       this.runs.finish(approval.chatId);
+      await this.finalizeBackgroundTaskForChat(userId, approval.chatId);
     }
   }
 
@@ -970,6 +1056,116 @@ export class EvaAgent extends DurableObject<Env> {
     const toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "rejected", "Rejected by the user.");
     this.broadcast("tool.update", { chatId: approval.chatId, toolCall });
     await audit(this.env.DB, userId, "tool.rejected", toolCallId, { tool: "bash" });
+    const task = await findBackgroundTaskByChat(this.env.DB, userId, approval.chatId);
+    if (task && !["completed", "failed", "cancelled"].includes(task.status)) {
+      const failed = await updateBackgroundTask(this.env.DB, userId, task.id, {
+        status: "failed",
+        progress: "Approval rejected",
+        error: "The required tool approval was rejected.",
+      });
+      this.broadcast("task.updated", { task: failed });
+      await this.notifyTaskCompletion(userId, failed);
+    }
+  }
+
+  private async createAndScheduleBackgroundTask(
+    userId: string,
+    input: { title: string; prompt: string; routing: RoutingPolicy; sourceChatId?: string },
+  ): Promise<BackgroundTask> {
+    const task = await createBackgroundTask(this.env.DB, userId, input);
+    await audit(this.env.DB, userId, "task.created", task.id, { routing: task.routing });
+    await this.env.REMINDER_SCHEDULER.getByName(userId).refresh(userId);
+    return task;
+  }
+
+  async processBackgroundTask(userId: string): Promise<void> {
+    const task = await getRunnableBackgroundTask(this.env.DB, userId);
+    if (!task) return;
+    const preferred = await this.ctx.storage.get<PreferredDeviceModel>("preferred-device-model");
+    const requestedDevice = preferred ? this.connectedDevices().find((device) => device.id === preferred.deviceId) : undefined;
+    const device = requestedDevice ?? this.connectedDevices()[0];
+    const useDevice = shouldRouteToDevice(task.routing, task.prompt, Boolean(device), Boolean(requestedDevice && preferred));
+
+    if ((task.routing === "device" || task.routing === "private") && !device) {
+      const waiting = await updateBackgroundTask(this.env.DB, userId, task.id, {
+        status: "waiting_device",
+        progress: "Waiting for an Eva desktop device",
+        retryAt: new Date(Date.now() + 30_000).toISOString(),
+      });
+      this.broadcast("task.updated", { task: waiting });
+      return;
+    }
+
+    try {
+      this.runs.start(task.chatId, await this.activeDeviceChatIds());
+    } catch {
+      const queued = await updateBackgroundTask(this.env.DB, userId, task.id, {
+        status: "queued",
+        progress: "Waiting for an execution slot",
+        retryAt: new Date(Date.now() + 5_000).toISOString(),
+      });
+      this.broadcast("task.updated", { task: queued });
+      return;
+    }
+
+    const running = await updateBackgroundTask(this.env.DB, userId, task.id, {
+      status: "running",
+      progress: useDevice ? "Running on device" : "Running in cloud",
+      executionHost: useDevice ? "device" : "cloud",
+      deviceId: useDevice ? device?.id : undefined,
+    });
+    this.broadcast("task.updated", { task: running });
+    try {
+      await this.routePrompt(userId, task.chatId, task.prompt, task.routing, task.id);
+      const current = await getBackgroundTask(this.env.DB, userId, task.id);
+      if (current.status === "waiting_device") return;
+      const pendingDevice = (await this.pendingDeviceTurns()).some((turn) => turn.taskId === task.id);
+      if (!pendingDevice) await this.finalizeBackgroundTaskForChat(userId, task.chatId);
+    } catch (error) {
+      this.runs.finish(task.chatId);
+      const failed = await updateBackgroundTask(this.env.DB, userId, task.id, {
+        status: "failed",
+        progress: "Failed",
+        error: errorMessage(error),
+      });
+      this.broadcast("task.updated", { task: failed });
+      await this.notifyTaskCompletion(userId, failed);
+    }
+  }
+
+  private async finalizeBackgroundTaskForChat(userId: string, chatId: string): Promise<void> {
+    const task = await findBackgroundTaskByChat(this.env.DB, userId, chatId);
+    if (!task || ["completed", "failed", "cancelled"].includes(task.status)) return;
+    if (await hasPendingApproval(this.env.DB, userId, chatId)) {
+      const waiting = await updateBackgroundTask(this.env.DB, userId, task.id, {
+        status: "waiting_approval",
+        progress: "Waiting for approval",
+      });
+      this.broadcast("task.updated", { task: waiting });
+      return;
+    }
+    const chat = await getChat(this.env.DB, userId, chatId);
+    const assistant = [...chat.messages].reverse().find((message) => message.role === "assistant");
+    const successful = assistant?.status === "complete";
+    const updated = await updateBackgroundTask(this.env.DB, userId, task.id, {
+      status: successful ? "completed" : "failed",
+      progress: successful ? "Completed" : "Failed",
+      result: successful ? assistant.content.slice(0, 20_000) : undefined,
+      error: successful ? undefined : assistant?.content || "The task did not complete.",
+      executionHost: assistant?.executionHost,
+      deviceId: assistant?.deviceId,
+      model: assistant?.model,
+    });
+    this.broadcast("task.updated", { task: updated });
+    await audit(this.env.DB, userId, `task.${updated.status}`, updated.id);
+    await this.notifyTaskCompletion(userId, updated);
+  }
+
+  private async notifyTaskCompletion(userId: string, task: BackgroundTask): Promise<void> {
+    const preferences = await getNotificationPreferences(this.env.DB, userId);
+    if (!preferences.appEnabled || !["completed", "failed"].includes(task.status)) return;
+    const notification = await createTaskNotification(this.env.DB, userId, task);
+    this.broadcast("notification.created", { notification });
   }
 
   private streamText(chatId: string, messageId: string, text: string): void {
