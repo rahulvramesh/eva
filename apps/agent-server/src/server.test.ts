@@ -1,0 +1,116 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { WebSocket } from "ws";
+import { afterEach, describe, expect, it } from "vitest";
+import { command, type Chat, type ServerEvent } from "../../../packages/protocol/src/index";
+import { FakeAgentBackend } from "./agent-backend";
+import { ChatRepository } from "./chat-repository";
+import { AgentServer } from "./server";
+
+const cleanup: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  await Promise.all(cleanup.splice(0).map((close) => close()));
+});
+
+describe("AgentServer", () => {
+  it("creates a chat, streams a response, and persists the transcript", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
+    const repository = new ChatRepository(directory);
+    const server = new AgentServer({
+      host: "127.0.0.1",
+      port: 0,
+      token: "test-token",
+      repository,
+      backend: new FakeAgentBackend(),
+    });
+    const port = await server.listen();
+    cleanup.push(async () => { await server.close(); await rm(directory, { recursive: true, force: true }); });
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+    cleanup.push(async () => socket.close());
+    const events: ServerEvent[] = [];
+    socket.on("message", (data) => events.push(JSON.parse(data.toString()) as ServerEvent));
+    await waitFor(() => events.some((event) => event.type === "server.hello"));
+
+    socket.send(JSON.stringify(command("chat.create", {})));
+    const created = await findEvent(events, "chat.created");
+    const chat = created.payload.chat;
+    socket.send(JSON.stringify(command("message.send", { chatId: chat.id, content: "Hello there" })));
+    await waitFor(() => events.some((event) => event.type === "run.status" && event.payload.status === "idle"));
+
+    const restored = await repository.get(chat.id);
+    expect(restored.title).toBe("Hello there");
+    expect(restored.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    expect(restored.messages[1]?.content).toBe("I’m Eva. You said: “Hello there”");
+    expect(events.filter((event) => event.type === "assistant.delta").length).toBeGreaterThan(2);
+  });
+
+  it("rejects an incorrect token", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
+    const server = new AgentServer({
+      host: "127.0.0.1",
+      port: 0,
+      token: "right-token",
+      repository: new ChatRepository(directory),
+      backend: new FakeAgentBackend(),
+    });
+    const port = await server.listen();
+    cleanup.push(async () => { await server.close(); await rm(directory, { recursive: true, force: true }); });
+    const response = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(response.ok).toBe(true);
+    await expect(new Promise<void>((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=wrong-token`);
+      socket.once("open", () => resolve());
+      socket.once("error", reject);
+    })).rejects.toThrow();
+  });
+
+  it("returns and updates capability-aware model settings", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
+    const server = new AgentServer({
+      host: "127.0.0.1",
+      port: 0,
+      token: "test-token",
+      repository: new ChatRepository(directory),
+      backend: new FakeAgentBackend(),
+    });
+    const port = await server.listen();
+    cleanup.push(async () => { await server.close(); await rm(directory, { recursive: true, force: true }); });
+
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+    cleanup.push(async () => socket.close());
+    const events: ServerEvent[] = [];
+    socket.on("message", (data) => events.push(JSON.parse(data.toString()) as ServerEvent));
+    await waitFor(() => events.some((event) => event.type === "server.hello"));
+
+    socket.send(JSON.stringify(command("settings.get", {})));
+    const snapshot = await findEvent(events, "settings.snapshot");
+    expect(snapshot.payload.settings.models).toHaveLength(3);
+
+    socket.send(JSON.stringify(command("settings.update", {
+      provider: "demo",
+      modelId: "eva-fast",
+      thinkingLevel: "high",
+      systemInstructions: "  Be concise.  ",
+    })));
+    const updated = await findEvent(events, "settings.updated");
+    expect(updated.payload.settings.selectedModel.id).toBe("eva-fast");
+    expect(updated.payload.settings.thinkingLevel).toBe("off");
+    expect(updated.payload.settings.systemInstructions).toBe("Be concise.");
+  });
+});
+
+async function waitFor(predicate: () => boolean, timeout = 3_000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeout) throw new Error("Timed out waiting for server event");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function findEvent<T extends ServerEvent["type"]>(events: ServerEvent[], type: T): Promise<Extract<ServerEvent, { type: T }>> {
+  await waitFor(() => events.some((event) => event.type === type));
+  return events.find((event) => event.type === type) as Extract<ServerEvent, { type: T }>;
+}

@@ -1,0 +1,9 @@
+node_modules/
+out/
+dist/
+release/
+.eva-dev/
+.eva-data/
+build/Eva.iconset/
+*.log
+.DS_Store
