@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const PROTOCOL_VERSION = 2;
+export const MAX_CONCURRENT_CHATS = 3;
 
 export const executionHostSchema = z.enum(["cloud", "device"]);
 export type ExecutionHost = z.infer<typeof executionHostSchema>;

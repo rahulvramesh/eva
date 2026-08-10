@@ -346,6 +346,15 @@ export async function takeApproval(db: D1Database, userId: string, toolCallId: s
   };
 }
 
+export async function getPendingApprovalChatId(db: D1Database, userId: string, toolCallId: string): Promise<string> {
+  const row = await db.prepare(`
+    SELECT chat_id FROM pending_approvals
+    WHERE user_id = ?1 AND tool_call_id = ?2 AND status = 'pending'
+  `).bind(userId, toolCallId).first<{ chat_id: string }>();
+  if (!row) throw new Error("That approval is no longer pending.");
+  return row.chat_id;
+}
+
 export async function listMemories(db: D1Database, userId: string): Promise<Memory[]> {
   const result = await db.prepare(`
     SELECT id, kind, content, importance, source_chat_id, source_message_id, status,

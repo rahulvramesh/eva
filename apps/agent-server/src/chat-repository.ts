@@ -8,6 +8,7 @@ type ChatIndex = { version: 1; chats: ChatSummary[] };
 export class ChatRepository {
   private readonly chatsDir: string;
   private readonly indexPath: string;
+  private indexUpdates: Promise<void> = Promise.resolve();
 
   constructor(private readonly dataDir: string) {
     this.chatsDir = join(dataDir, "chats");
@@ -39,9 +40,7 @@ export class ChatRepository {
       toolCalls: [],
     };
     await this.atomicWrite(this.chatPath(chat.id), chat);
-    const index = await this.readIndex();
-    index.chats.unshift(this.toSummary(chat));
-    await this.writeIndex(index);
+    await this.updateIndex((index) => { index.chats.unshift(this.toSummary(chat)); });
     return chat;
   }
 
@@ -97,12 +96,12 @@ export class ChatRepository {
 
   private async save(chat: Chat): Promise<void> {
     await this.atomicWrite(this.chatPath(chat.id), chat);
-    const index = await this.readIndex();
-    const summary = this.toSummary(chat);
-    const existing = index.chats.findIndex((candidate) => candidate.id === chat.id);
-    if (existing >= 0) index.chats[existing] = summary;
-    else index.chats.push(summary);
-    await this.writeIndex(index);
+    await this.updateIndex((index) => {
+      const summary = this.toSummary(chat);
+      const existing = index.chats.findIndex((candidate) => candidate.id === chat.id);
+      if (existing >= 0) index.chats[existing] = summary;
+      else index.chats.push(summary);
+    });
   }
 
   private async readIndex(): Promise<ChatIndex> {
@@ -111,6 +110,16 @@ export class ChatRepository {
 
   private writeIndex(index: ChatIndex): Promise<void> {
     return this.atomicWrite(this.indexPath, index);
+  }
+
+  private updateIndex(update: (index: ChatIndex) => void): Promise<void> {
+    const operation = this.indexUpdates.then(async () => {
+      const index = await this.readIndex();
+      update(index);
+      await this.writeIndex(index);
+    });
+    this.indexUpdates = operation.catch(() => undefined);
+    return operation;
   }
 
   private chatPath(id: string): string {
@@ -123,7 +132,7 @@ export class ChatRepository {
   }
 
   private async atomicWrite(path: string, value: unknown): Promise<void> {
-    const temporary = `${path}.${process.pid}.tmp`;
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
     await rename(temporary, path);
   }

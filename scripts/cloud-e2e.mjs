@@ -126,6 +126,50 @@ async function run() {
   if (!chatText.includes("EVA_CLOUD_CHAT_OK")) throw new Error(`Unexpected chat response: ${chatText}`);
   if (chatDeltas.length < 2) throw new Error(`Workers AI response was not incrementally streamed (${chatDeltas.length} delta).`);
 
+  send("chat.create");
+  const concurrentA = await waitFor(
+    (event) => event.type === "chat.created" && ![chatId, recallChat.payload.chat.id, saveChat.payload.chat.id].includes(event.payload.chat.id),
+    "first concurrent chat",
+  );
+  send("chat.create");
+  const concurrentB = await waitFor(
+    (event) => event.type === "chat.created" && ![chatId, recallChat.payload.chat.id, saveChat.payload.chat.id, concurrentA.payload.chat.id].includes(event.payload.chat.id),
+    "second concurrent chat",
+  );
+  received.length = 0;
+  send("message.send", {
+    chatId: concurrentA.payload.chat.id,
+    content: "Write 300 words about distributed systems, ending with EVA_CONCURRENT_A.",
+    routing: "cloud",
+  });
+  send("message.send", {
+    chatId: concurrentB.payload.chat.id,
+    content: "Reply with exactly: EVA_CONCURRENT_B",
+    routing: "cloud",
+  });
+  await waitFor(
+    (event) => event.type === "assistant.delta" && event.payload.chatId === concurrentA.payload.chat.id,
+    "first concurrent stream",
+  );
+  await waitFor(
+    (event) => event.type === "run.status" && event.payload.chatId === concurrentB.payload.chat.id && event.payload.status === "running",
+    "second concurrent run",
+  );
+  send("run.abort", { chatId: concurrentA.payload.chat.id });
+  await waitFor(
+    (event) => event.type === "run.status" && event.payload.chatId === concurrentA.payload.chat.id && event.payload.status === "aborted",
+    "scoped concurrent abort",
+  );
+  await waitFor(
+    (event) => event.type === "run.status" && event.payload.chatId === concurrentB.payload.chat.id && event.payload.status === "idle",
+    "uninterrupted concurrent completion",
+  );
+  const concurrentBText = received
+    .filter((event) => event.type === "assistant.delta" && event.payload.chatId === concurrentB.payload.chat.id)
+    .map((event) => event.payload.delta)
+    .join("");
+  if (!concurrentBText.includes("EVA_CONCURRENT_B")) throw new Error(`Concurrent chat was interrupted: ${concurrentBText}`);
+
   if (!skipBash) {
     received.length = 0;
     send("message.send", {
@@ -165,6 +209,8 @@ async function run() {
       "immediate-cross-chat-recall",
       "verified-save-receipt",
       "workers-ai-stream",
+      "concurrent-chats",
+      "scoped-abort",
       ...skipBash ? [] : ["bash-approval", "sandbox"],
     ],
   }));

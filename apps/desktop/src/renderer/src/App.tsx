@@ -41,16 +41,25 @@ import {
 } from "../../../../../packages/protocol/src/index";
 import { EvaClient, hasCloudConfiguration, saveCloudConfiguration } from "./eva-client";
 import evaLogo from "./assets/eva-app-icon.png";
+import {
+  appendAssistantDelta,
+  appendMessage,
+  completeAssistantMessage,
+  mergeChatSnapshot,
+  upsertToolCall,
+} from "./chat-state";
 
 export function App() {
   const clientRef = useRef<EvaClient | undefined>(undefined);
   const activeChatRef = useRef<string | undefined>(undefined);
+  const chatCacheRef = useRef(new Map<string, Chat>());
+  const chatsRef = useRef<ChatSummary[]>([]);
   const transcriptRef = useRef<HTMLDivElement>(null);
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [activeChat, setActiveChat] = useState<Chat>();
   const [draft, setDraft] = useState("");
   const [connected, setConnected] = useState(false);
-  const [running, setRunning] = useState(false);
+  const [runningChats, setRunningChats] = useState<Set<string>>(() => new Set());
   const [agentMode, setAgentMode] = useState<"pi" | "fake" | "cloud" | "hybrid">("pi");
   const [error, setError] = useState<string>();
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -63,10 +72,12 @@ export function App() {
     const saved = localStorage.getItem("eva-routing-policy");
     return saved === "cloud" || saved === "device" || saved === "private" ? saved : "auto";
   });
-  const [routeStatus, setRouteStatus] = useState<Extract<ServerEvent, { type: "route.status" }>["payload"]>();
+  const [routeStatuses, setRouteStatuses] = useState<Record<string, Extract<ServerEvent, { type: "route.status" }>["payload"]>>({});
   const [theme, setTheme] = useState<"light" | "dark">(() => localStorage.getItem("eva-theme") === "light" ? "light" : "dark");
   const [showToolCalls, setShowToolCalls] = useState(() => localStorage.getItem("eva-show-tool-calls") !== "false");
   const [syncOfflineToolOutput, setSyncOfflineToolOutput] = useState(() => localStorage.getItem("eva-sync-offline-tool-output") === "true");
+  const running = activeChat ? runningChats.has(activeChat.id) : false;
+  const routeStatus = activeChat ? routeStatuses[activeChat.id] : undefined;
 
   useEffect(() => {
     document.documentElement.dataset.platform = window.eva?.platform ?? "web";
@@ -111,12 +122,29 @@ export function App() {
     if (node) node.scrollTop = node.scrollHeight;
   }, [activeChat?.messages, activeChat?.toolCalls]);
 
+  function updateCachedChat(chatId: string, update: (chat: Chat) => Chat): void {
+    let current = chatCacheRef.current.get(chatId);
+    if (!current) {
+      const chat = chatsRef.current.find((candidate) => candidate.id === chatId);
+      if (!chat) return;
+      current = { ...chat, messages: [], toolCalls: [] };
+    }
+    const next = update(current);
+    chatCacheRef.current.set(chatId, next);
+    if (activeChatRef.current === chatId) setActiveChat(next);
+  }
+
   function handleEvent(event: ServerEvent, client: EvaClient): void {
     switch (event.type) {
       case "server.hello":
         setAgentMode(event.payload.agentMode);
         break;
       case "chat.list": {
+        chatsRef.current = event.payload.chats;
+        for (const chat of event.payload.chats) {
+          const cached = chatCacheRef.current.get(chat.id);
+          if (cached) chatCacheRef.current.set(chat.id, { ...cached, ...chat });
+        }
         setChats(event.payload.chats);
         setActiveChat((current) => {
           if (!current) return current;
@@ -131,64 +159,46 @@ export function App() {
         break;
       }
       case "chat.created":
-        setChats((current) => [summary(event.payload.chat), ...current.filter((chat) => chat.id !== event.payload.chat.id)]);
+        chatsRef.current = [summary(event.payload.chat), ...chatsRef.current.filter((chat) => chat.id !== event.payload.chat.id)];
+        setChats(chatsRef.current);
         selectSnapshot(event.payload.chat);
         break;
       case "chat.snapshot":
         selectSnapshot(event.payload.chat);
         break;
       case "message.append":
-        if (event.payload.chatId === activeChatRef.current) {
-          setActiveChat((chat) => chat && ({ ...chat, messages: [...chat.messages, event.payload.message] }));
-        }
+        updateCachedChat(event.payload.chatId, (chat) => appendMessage(chat, event.payload.message));
         break;
       case "assistant.delta":
-        if (event.payload.chatId === activeChatRef.current) {
-          setActiveChat((chat) => chat && ({
-            ...chat,
-            messages: chat.messages.map((message) => message.id === event.payload.messageId
-              ? { ...message, content: message.content + event.payload.delta }
-              : message),
-          }));
-        }
+        updateCachedChat(event.payload.chatId, (chat) => appendAssistantDelta(chat, event.payload.messageId, event.payload.delta));
         break;
       case "tool.call":
-        if (event.payload.chatId === activeChatRef.current) {
-          setActiveChat((chat) => chat && ({
-            ...chat,
-            toolCalls: chat.toolCalls.some((toolCall) => toolCall.id === event.payload.toolCall.id)
-              ? chat.toolCalls.map((toolCall) => toolCall.id === event.payload.toolCall.id ? event.payload.toolCall : toolCall)
-              : [...chat.toolCalls, event.payload.toolCall],
-          }));
-        }
-        break;
       case "tool.update":
-        if (event.payload.chatId === activeChatRef.current) {
-          setActiveChat((chat) => chat && ({
-            ...chat,
-            toolCalls: chat.toolCalls.map((toolCall) => toolCall.id === event.payload.toolCall.id ? event.payload.toolCall : toolCall),
-          }));
-        }
+        updateCachedChat(event.payload.chatId, (chat) => upsertToolCall(chat, event.payload.toolCall));
         break;
-      case "run.status":
-        setRunning(event.payload.status === "running");
-        if (event.payload.status === "error") setError("The model could not complete that response.");
+      case "run.status": {
+        setRunningChats((current) => {
+          const next = new Set(current);
+          if (event.payload.status === "running") next.add(event.payload.chatId);
+          else next.delete(event.payload.chatId);
+          return next;
+        });
+        if (event.payload.status === "error" && event.payload.chatId === activeChatRef.current) setError("The model could not complete that response.");
         break;
+      }
       case "device.presence":
         setDevices(event.payload.devices);
         break;
       case "route.status":
-        if (event.payload.chatId === activeChatRef.current) setRouteStatus(event.payload);
+        setRouteStatuses((current) => ({ ...current, [event.payload.chatId]: event.payload }));
         break;
       case "device.turn.complete":
-        if (event.payload.chatId === activeChatRef.current) {
-          setActiveChat((chat) => chat && ({
-            ...chat,
-            messages: chat.messages.map((message) => message.id === event.payload.messageId
-              ? { ...message, content: event.payload.content, status: event.payload.status }
-              : message),
-          }));
-        }
+        updateCachedChat(event.payload.chatId, (chat) => completeAssistantMessage(
+          chat,
+          event.payload.messageId,
+          event.payload.content,
+          event.payload.status,
+        ));
         break;
       case "settings.snapshot":
       case "settings.updated":
@@ -210,20 +220,29 @@ export function App() {
   }
 
   function selectSnapshot(chat: Chat): void {
+    const merged = mergeChatSnapshot(chatCacheRef.current.get(chat.id), chat);
+    chatCacheRef.current.set(chat.id, merged);
     activeChatRef.current = chat.id;
-    setActiveChat(chat);
+    setActiveChat(merged);
+    setRunningChats((current) => {
+      const next = new Set(current);
+      if (merged.messages.some((message) => message.status === "streaming")) next.add(chat.id);
+      else next.delete(chat.id);
+      return next;
+    });
     setError(undefined);
   }
 
   function openChat(chatId: string, client = clientRef.current): void {
-    if (!client || running) return;
+    if (!client) return;
     activeChatRef.current = chatId;
+    const cached = chatCacheRef.current.get(chatId);
+    if (cached) setActiveChat(cached);
     client.send(command("chat.open", { chatId }));
     setSidebarOpen(false);
   }
 
   function createChat(): void {
-    if (running) return;
     clientRef.current?.send(command("chat.create", {}));
   }
 
@@ -259,29 +278,28 @@ export function App() {
         <button className="header-icon sidebar-toggle" onClick={() => setSidebarOpen((value) => !value)} aria-label="Toggle chats">
           <SidebarSimple weight="regular" />
         </button>
-        <button className="chat-title-pill" onClick={createChat} disabled={running} title="Start a new chat">
+        <button className="chat-title-pill" onClick={createChat} title="Start a new chat">
           {activeChat?.title === "New chat" ? "New Chat" : activeChat?.title ?? "New Chat"}
         </button>
         <div className="header-actions">
-          <button className="header-icon" onClick={createChat} disabled={running} aria-label="New chat"><Plus weight="bold" /></button>
+          <button className="header-icon" onClick={createChat} aria-label="New chat"><Plus weight="bold" /></button>
           <button className="header-icon caret" onClick={() => setSidebarOpen((value) => !value)} aria-label="Show chats"><CaretDown weight="bold" /></button>
         </div>
       </header>
 
       {sidebarOpen && (
         <aside className="chat-drawer">
-          <div className="drawer-heading"><span>Chats</span><button onClick={createChat} disabled={running}><Plus weight="bold" /> New</button></div>
+          <div className="drawer-heading"><span>Chats</span><button onClick={createChat}><Plus weight="bold" /> New</button></div>
           <nav className="chat-list" aria-label="Chats">
             {chats.map((chat) => (
               <button
                 key={chat.id}
                 className={chat.id === activeChat?.id ? "chat-item active" : "chat-item"}
                 onClick={() => openChat(chat.id)}
-                disabled={running && chat.id !== activeChat?.id}
               >
                 <ChatCircleDots weight="regular" />
                 <span>{chat.title}</span>
-                <time>{relativeDate(chat.updatedAt)}</time>
+                <time>{runningChats.has(chat.id) ? "Running…" : relativeDate(chat.updatedAt)}</time>
               </button>
             ))}
           </nav>
@@ -311,7 +329,7 @@ export function App() {
             {settingsOpen && settings && (
               <SettingsPopover
                 settings={settings}
-                disabled={running}
+                disabled={runningChats.size > 0}
                 theme={theme}
                 onThemeChange={setTheme}
                 showToolCalls={showToolCalls}

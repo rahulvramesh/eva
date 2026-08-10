@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   PROTOCOL_VERSION,
+  MAX_CONCURRENT_CHATS,
   clientCommandSchema,
   type ChatMessage,
   type ClientCommand,
@@ -26,6 +27,7 @@ export class AgentServer {
   private readonly sockets = new Set<WebSocket>();
   private readonly running = new Map<string, { assistantId: string; content: string }>();
   private readonly deviceTurns = new Map<string, string>();
+  private readonly reservedChats = new Set<string>();
   private sequence = 0;
 
   constructor(private readonly options: AgentServerOptions) {
@@ -119,7 +121,7 @@ export class AgentServer {
         this.send(socket, "settings.snapshot", { settings: await this.options.backend.getSettings() });
         return;
       case "settings.update":
-        if (this.running.size > 0) throw new Error("Stop the current response before changing model settings.");
+        if (this.running.size > 0 || this.deviceTurns.size > 0 || this.reservedChats.size > 0) throw new Error("Stop the current responses before changing model settings.");
         this.broadcast("settings.updated", {
           settings: await this.options.backend.updateSettings({
             provider: command.provider,
@@ -130,20 +132,32 @@ export class AgentServer {
         });
         return;
       case "message.send":
-        if (this.running.size > 0) throw new Error("Wait for the current response or stop it first.");
-        void this.runPrompt(command.chatId, command.content);
+        this.reserveChat(command.chatId);
+        void this.runPrompt(command.chatId, command.content)
+          .catch((error) => this.send(socket, "server.error", { code: "AGENT_ERROR", message: error instanceof Error ? error.message : "Agent failed" }))
+          .finally(() => this.reservedChats.delete(command.chatId));
         return;
       case "device.turn.execute":
-        if (this.deviceTurns.size > 0) throw new Error("This device is already completing another turn.");
-        void this.runDeviceTurn(socket, command.turnId, command.chat, command.content);
+        this.reserveChat(command.chat.id);
+        void this.runDeviceTurn(socket, command.turnId, command.chat, command.content)
+          .catch((error) => this.send(socket, "server.error", { code: "AGENT_ERROR", message: error instanceof Error ? error.message : "Agent failed" }))
+          .finally(() => this.reservedChats.delete(command.chat.id));
         return;
     }
+  }
+
+  private reserveChat(chatId: string): void {
+    const activeChats = new Set([...this.running.keys(), ...this.deviceTurns.values(), ...this.reservedChats]);
+    if (activeChats.has(chatId)) throw new Error("Wait for this chat's current response or stop it first.");
+    if (activeChats.size >= MAX_CONCURRENT_CHATS) throw new Error(`Eva can run up to ${MAX_CONCURRENT_CHATS} chats at once.`);
+    this.reservedChats.add(chatId);
   }
 
   private async runDeviceTurn(socket: WebSocket, turnId: string, chat: Parameters<AgentBackend["generate"]>[0], prompt: string): Promise<void> {
     const assistant = [...chat.messages].reverse().find((message) => message.role === "assistant" && message.status === "streaming");
     if (!assistant) throw new Error("The hybrid turn is missing its assistant message.");
     this.deviceTurns.set(turnId, chat.id);
+    this.reservedChats.delete(chat.id);
     let content = "";
     let toolQueue = Promise.resolve();
     const toolCalls = new Map<string, ToolCall>();
@@ -210,6 +224,7 @@ export class AgentServer {
     const assistantMessage = makeMessage("assistant", "", "streaming");
     chat = await this.options.repository.appendMessage(chatId, assistantMessage);
     this.running.set(chatId, { assistantId: assistantMessage.id, content: "" });
+    this.reservedChats.delete(chatId);
     this.broadcast("message.append", { chatId, message: assistantMessage });
     this.broadcast("run.status", { chatId, status: "running" });
 

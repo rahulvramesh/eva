@@ -22,6 +22,7 @@ import {
   deleteMemory,
   ensureUser,
   getChat,
+  getPendingApprovalChatId,
   getSettings,
   importTurn,
   listChats,
@@ -34,6 +35,7 @@ import {
   updateToolCall,
   upsertToolCall,
   type ModelMessage,
+  type PendingApproval,
 } from "./db";
 import { enqueueMemory, enqueueMemoryDelete, retrieveMemories } from "./memory";
 import {
@@ -45,6 +47,7 @@ import {
 import { runBash, runWebFetch } from "./tools";
 import { isPrivateCapableModel, shouldRouteToDevice } from "./routing";
 import { consumeChatCompletionStream } from "./model-stream";
+import { ChatRunRegistry } from "./chat-run-registry";
 
 type SocketAttachment = { userId: string; identity: string; device?: DeviceCapability };
 type ModelToolCall = { id: string; name: string; input: Record<string, unknown> };
@@ -55,6 +58,7 @@ type PendingDeviceTurn = {
   assistantMessageId: string;
   deviceId: string;
   private: boolean;
+  expiresAt: number;
 };
 type PreferredDeviceModel = { deviceId: string; provider: string; modelId: string; thinkingLevel: AgentSettings["thinkingLevel"]; systemInstructions: string };
 
@@ -103,8 +107,7 @@ const MODEL_TOOLS = [
 
 export class EvaAgent extends DurableObject<Env> {
   private sequence = 0;
-  private running = false;
-  private abortRequested = false;
+  private readonly runs = new ChatRunRegistry();
 
   async fetch(request: Request): Promise<Response> {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return new Response("Expected WebSocket", { status: 426 });
@@ -155,10 +158,9 @@ export class EvaAgent extends DurableObject<Env> {
 
   async webSocketClose(socket: WebSocket): Promise<void> {
     const attachment = socket.deserializeAttachment() as SocketAttachment | null;
-    const activeTurnId = await this.ctx.storage.get<string>("active-device-turn");
-    if (attachment?.device && activeTurnId) {
-      const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${activeTurnId}`);
-      if (pending?.deviceId === attachment.device.id) {
+    if (attachment?.device) {
+      const pendingTurns = await this.pendingDeviceTurns();
+      for (const pending of pendingTurns.filter((turn) => turn.deviceId === attachment.device?.id)) {
         await this.failDeviceTurn(pending, "The selected Eva desktop disconnected during the turn.");
       }
     }
@@ -182,7 +184,7 @@ export class EvaAgent extends DurableObject<Env> {
         this.send(socket, "settings.snapshot", { settings: await this.hybridSettings(userId) });
         return;
       case "settings.update": {
-        if (this.running || await this.ctx.storage.get("active-device-turn")) throw new Error("Stop the current response before changing model settings.");
+        if (this.runs.hasActive() || (await this.activeDeviceChatIds()).length) throw new Error("Stop the current responses before changing model settings.");
         const deviceModel = this.findDeviceModel(command.provider, command.modelId);
         if (deviceModel) {
           const preferred: PreferredDeviceModel = {
@@ -238,7 +240,7 @@ export class EvaAgent extends DurableObject<Env> {
         this.broadcast("memory.deleted", { memoryId: command.memoryId });
         return;
       case "run.abort":
-        this.abortRequested = true;
+        this.runs.requestAbort(command.chatId);
         await this.abortDeviceTurn(command.chatId);
         return;
       case "tool.approve":
@@ -248,10 +250,9 @@ export class EvaAgent extends DurableObject<Env> {
         await this.rejectTool(userId, command.toolCallId);
         return;
       case "message.send":
-        if (this.running || await this.ctx.storage.get("active-device-turn")) throw new Error("Wait for the current response or stop it first.");
-        this.running = true;
+        this.runs.start(command.chatId, await this.activeDeviceChatIds());
         this.ctx.waitUntil(this.routePrompt(userId, command.chatId, command.content, command.routing ?? "auto").catch((error) => {
-          this.running = false;
+          this.runs.finish(command.chatId);
           this.broadcast("server.error", { code: "ROUTING_ERROR", message: errorMessage(error) });
         }));
         return;
@@ -313,8 +314,6 @@ export class EvaAgent extends DurableObject<Env> {
     device: DeviceCapability,
     preferred?: PreferredDeviceModel,
   ): Promise<void> {
-    this.running = true;
-    this.abortRequested = false;
     const turnId = crypto.randomUUID();
     try {
       const model = preferred ? `${preferred.provider}/${preferred.modelId}` : selectedDeviceModel(device);
@@ -330,10 +329,10 @@ export class EvaAgent extends DurableObject<Env> {
         assistantMessageId: assistant.id,
         deviceId: device.id,
         private: routing === "private",
+        expiresAt: Date.now() + 5 * 60_000,
       };
       await this.ctx.storage.put(`device-turn:${turnId}`, pending);
-      await this.ctx.storage.put("active-device-turn", turnId);
-      await this.ctx.storage.setAlarm(Date.now() + 5 * 60_000);
+      await this.scheduleDeviceAlarm();
       this.broadcast("run.status", { chatId, status: "running" });
       this.broadcast("route.status", {
         chatId,
@@ -357,8 +356,8 @@ export class EvaAgent extends DurableObject<Env> {
       const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${turnId}`);
       if (pending) await this.failDeviceTurn(pending, errorMessage(error));
       else {
-        this.running = false;
-        await this.ctx.storage.delete([`device-turn:${turnId}`, "active-device-turn"]);
+        this.runs.finish(chatId);
+        await this.ctx.storage.delete([`device-turn:${turnId}`, `active-device-turn:${chatId}`]);
         this.broadcast("route.status", { chatId, turnId, host: "device", deviceId: device.id, private: routing === "private", status: "error" });
       }
       throw error;
@@ -388,9 +387,9 @@ export class EvaAgent extends DurableObject<Env> {
   ): Promise<void> {
     const pending = await this.authorizeDeviceTurn(socket, turnId);
     await updateMessage(this.env.DB, pending.userId, pending.chatId, pending.assistantMessageId, { content, status });
-    await this.ctx.storage.delete([`device-turn:${turnId}`, "active-device-turn"]);
-    await this.ctx.storage.deleteAlarm();
-    this.running = false;
+    await this.ctx.storage.delete([`device-turn:${turnId}`, `active-device-turn:${pending.chatId}`]);
+    this.runs.finish(pending.chatId);
+    await this.scheduleDeviceAlarm();
     this.broadcast("device.turn.complete", {
       turnId,
       chatId: pending.chatId,
@@ -420,21 +419,19 @@ export class EvaAgent extends DurableObject<Env> {
   }
 
   private async abortDeviceTurn(chatId: string): Promise<void> {
-    const turnId = await this.ctx.storage.get<string>("active-device-turn");
-    if (!turnId) return;
-    const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${turnId}`);
-    if (!pending || pending.chatId !== chatId) return;
+    const pending = (await this.pendingDeviceTurns()).find((turn) => turn.chatId === chatId);
+    if (!pending) return;
     for (const candidate of this.ctx.getWebSockets()) {
       const attachment = candidate.deserializeAttachment() as SocketAttachment | null;
-      if (attachment?.device?.id === pending.deviceId) this.send(candidate, "device.turn.abort", { turnId, chatId });
+      if (attachment?.device?.id === pending.deviceId) this.send(candidate, "device.turn.abort", { turnId: pending.turnId, chatId });
     }
   }
 
   private async failDeviceTurn(pending: PendingDeviceTurn, message: string): Promise<void> {
     await updateMessage(this.env.DB, pending.userId, pending.chatId, pending.assistantMessageId, { content: message, status: "error" });
-    await this.ctx.storage.delete([`device-turn:${pending.turnId}`, "active-device-turn"]);
-    await this.ctx.storage.deleteAlarm();
-    this.running = false;
+    await this.ctx.storage.delete([`device-turn:${pending.turnId}`, `active-device-turn:${pending.chatId}`]);
+    this.runs.finish(pending.chatId);
+    await this.scheduleDeviceAlarm();
     this.broadcast("device.turn.complete", {
       turnId: pending.turnId,
       chatId: pending.chatId,
@@ -455,10 +452,29 @@ export class EvaAgent extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    const turnId = await this.ctx.storage.get<string>("active-device-turn");
-    if (!turnId) return;
-    const pending = await this.ctx.storage.get<PendingDeviceTurn>(`device-turn:${turnId}`);
-    if (pending) await this.failDeviceTurn(pending, "The device turn timed out after five minutes.");
+    const now = Date.now();
+    for (const pending of await this.pendingDeviceTurns()) {
+      if ((pending.expiresAt ?? now) <= now) await this.failDeviceTurn(pending, "The device turn timed out after five minutes.");
+    }
+    await this.scheduleDeviceAlarm();
+  }
+
+  private async pendingDeviceTurns(): Promise<PendingDeviceTurn[]> {
+    const entries = await this.ctx.storage.list<PendingDeviceTurn>({ prefix: "device-turn:" });
+    return [...entries.values()];
+  }
+
+  private async activeDeviceChatIds(): Promise<string[]> {
+    return (await this.pendingDeviceTurns()).map((turn) => turn.chatId);
+  }
+
+  private async scheduleDeviceAlarm(): Promise<void> {
+    const pending = await this.pendingDeviceTurns();
+    if (!pending.length) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.ctx.storage.setAlarm(Math.min(...pending.map((turn) => turn.expiresAt ?? Date.now() + 5 * 60_000)));
   }
 
   private connectedDevices(): DeviceCapability[] {
@@ -507,8 +523,6 @@ export class EvaAgent extends DurableObject<Env> {
   }
 
   private async runPrompt(userId: string, chatId: string, content: string): Promise<void> {
-    this.running = true;
-    this.abortRequested = false;
     const turnId = crypto.randomUUID();
     let assistant: ChatMessage | undefined;
     try {
@@ -530,15 +544,17 @@ export class EvaAgent extends DurableObject<Env> {
       this.broadcast("route.status", { chatId, turnId, host: "cloud", private: false, status: "complete" });
     } catch (error) {
       if (assistant) {
-        const message = this.abortRequested ? "Stopped." : `I couldn’t complete that response: ${errorMessage(error)}`;
-        await updateMessage(this.env.DB, userId, chatId, assistant.id, { content: message, status: this.abortRequested ? "aborted" : "error" });
+        const aborted = this.runs.isAborted(chatId);
+        const message = aborted ? "Stopped." : `I couldn’t complete that response: ${errorMessage(error)}`;
+        await updateMessage(this.env.DB, userId, chatId, assistant.id, { content: message, status: aborted ? "aborted" : "error" });
         this.broadcast("assistant.delta", { chatId, messageId: assistant.id, delta: message });
       }
-      this.broadcast("run.status", { chatId, status: this.abortRequested ? "aborted" : "error" });
+      const aborted = this.runs.isAborted(chatId);
+      this.broadcast("run.status", { chatId, status: aborted ? "aborted" : "error" });
       this.broadcast("route.status", { chatId, turnId, host: "cloud", private: false, status: "error" });
-      if (!this.abortRequested) this.broadcast("server.error", { code: "AGENT_ERROR", message: errorMessage(error) });
+      if (!aborted) this.broadcast("server.error", { code: "AGENT_ERROR", message: errorMessage(error) });
     } finally {
-      this.running = false;
+      this.runs.finish(chatId);
       this.broadcast("chat.list", { chats: await listChats(this.env.DB, userId) });
     }
   }
@@ -555,11 +571,11 @@ export class EvaAgent extends DurableObject<Env> {
     let memoryReceipt = "";
     let memoryRetryIssued = false;
     for (let iteration = 0; iteration < 5; iteration += 1) {
-      if (this.abortRequested) throw new Error("ABORTED");
+      if (this.runs.isAborted(chatId)) throw new Error("ABORTED");
       const settings = await getSettings(this.env.DB, this.env, userId);
       let streamedResponse = "";
       const shouldBufferForMemoryVerification = memoryRequested && !memoryReceipt;
-      const result = await runModel(this.env, settings, messages, (delta) => {
+      const result = await runModel(this.env, settings, messages, this.runs.signal(chatId), (delta) => {
         streamedResponse += delta;
         if (!shouldBufferForMemoryVerification) {
           content += delta;
@@ -673,10 +689,15 @@ export class EvaAgent extends DurableObject<Env> {
   }
 
   private async approveTool(userId: string, toolCallId: string): Promise<void> {
-    if (this.running) throw new Error("Eva is already running.");
-    const approval = await takeApproval(this.env.DB, userId, toolCallId, "approved");
-    this.running = true;
-    this.abortRequested = false;
+    const chatId = await getPendingApprovalChatId(this.env.DB, userId, toolCallId);
+    this.runs.start(chatId, await this.activeDeviceChatIds());
+    let approval: PendingApproval;
+    try {
+      approval = await takeApproval(this.env.DB, userId, toolCallId, "approved");
+    } catch (error) {
+      this.runs.finish(chatId);
+      throw error;
+    }
     this.broadcast("run.status", { chatId: approval.chatId, status: "running" });
     try {
       let toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "running", "");
@@ -697,7 +718,7 @@ export class EvaAgent extends DurableObject<Env> {
       this.broadcast("server.error", { code: "TOOL_FAILED", message: output });
       this.broadcast("run.status", { chatId: approval.chatId, status: "error" });
     } finally {
-      this.running = false;
+      this.runs.finish(approval.chatId);
     }
   }
 
@@ -737,6 +758,7 @@ async function runModel(
   env: Env,
   settings: AgentSettings,
   messages: ModelMessage[],
+  signal: AbortSignal | undefined,
   onText: (delta: string) => void,
 ): Promise<{ response?: string; tool_calls?: ChatCompletionMessageToolCall[] }> {
   const input: ChatCompletionsMessagesInput & { stream: true } = {
@@ -756,7 +778,7 @@ async function runModel(
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let started = false;
     try {
-      const stream = await env.AI.run(env.EVA_CLOUD_MODEL, input);
+      const stream = await env.AI.run(env.EVA_CLOUD_MODEL, input, { signal });
       return await consumeChatCompletionStream(stream, (delta) => {
         started = true;
         onText(delta);

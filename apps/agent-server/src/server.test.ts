@@ -79,6 +79,49 @@ describe("AgentServer", () => {
     expect(events.some((event) => event.type === "tool.update" && event.payload.toolCall.status === "complete")).toBe(true);
   });
 
+  it("runs separate chats concurrently and aborts only the selected chat", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
+    const repository = new ChatRepository(directory);
+    const server = new AgentServer({
+      host: "127.0.0.1",
+      port: 0,
+      token: "test-token",
+      repository,
+      backend: new FakeAgentBackend(),
+    });
+    const port = await server.listen();
+    cleanup.push(async () => { await server.close(); await rm(directory, { recursive: true, force: true }); });
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws?token=test-token`);
+    cleanup.push(async () => socket.close());
+    const events: ServerEvent[] = [];
+    socket.on("message", (data) => events.push(JSON.parse(data.toString()) as ServerEvent));
+    await waitFor(() => events.some((event) => event.type === "server.hello"));
+
+    socket.send(JSON.stringify(command("chat.create", {})));
+    await waitFor(() => events.filter((event) => event.type === "chat.created").length === 1);
+    socket.send(JSON.stringify(command("chat.create", {})));
+    await waitFor(() => events.filter((event) => event.type === "chat.created").length === 2);
+    const created = events.filter((event): event is Extract<ServerEvent, { type: "chat.created" }> => event.type === "chat.created");
+    const [first, second] = created.map((event) => event.payload.chat);
+    if (!first || !second) throw new Error("Chats were not created");
+
+    const longPrompt = "Keep streaming this deliberately long response so both chats overlap ".repeat(4);
+    socket.send(JSON.stringify(command("message.send", { chatId: first.id, content: `${longPrompt}first` })));
+    socket.send(JSON.stringify(command("message.send", { chatId: second.id, content: `${longPrompt}second` })));
+    await waitFor(() => new Set(events
+      .filter((event): event is Extract<ServerEvent, { type: "run.status" }> => event.type === "run.status" && event.payload.status === "running")
+      .map((event) => event.payload.chatId)).size === 2).catch(() => {
+        throw new Error(`Concurrent starts were not observed: ${JSON.stringify(events.filter((event) => event.type === "run.status" || event.type === "server.error"))}`);
+      });
+    socket.send(JSON.stringify(command("run.abort", { chatId: first.id })));
+    await waitFor(() => events.some((event) => event.type === "run.status" && event.payload.chatId === first.id && event.payload.status === "aborted"));
+    await waitFor(() => events.some((event) => event.type === "run.status" && event.payload.chatId === second.id && event.payload.status === "idle"));
+
+    expect((await repository.get(first.id)).messages.at(-1)?.status).toBe("aborted");
+    expect((await repository.get(second.id)).messages.at(-1)?.status).toBe("complete");
+    expect(events.some((event) => event.type === "server.error" && event.payload.message.includes("current response"))).toBe(false);
+  });
+
   it("rejects an incorrect token", async () => {
     const directory = await mkdtemp(join(tmpdir(), "eva-server-"));
     const server = new AgentServer({
