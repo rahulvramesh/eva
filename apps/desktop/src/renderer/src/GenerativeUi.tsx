@@ -42,7 +42,8 @@ function ReminderCard({ block, onStatus, onDelete }: { block: Extract<UiBlock, {
 
 function ApprovalCard({ block, tool, onApprove, onReject }: { block: Extract<UiBlock, { kind: "approval" }>; tool?: ToolCall; onApprove: (id: string) => void; onReject: (id: string) => void }) {
   const pending = tool?.status === "pending";
-  return <section className="genui-card genui-approval"><header><ShieldCheck weight="fill" /><div><small>Approval required · {block.risk} risk</small><strong>{block.title}</strong></div></header><code>{block.description}</code>{pending ? <footer><button type="button" onClick={() => onReject(block.toolCallId)}>Reject</button><button type="button" className="genui-primary" onClick={() => onApprove(block.toolCallId)}>Run command</button></footer> : <div className="genui-complete"><CheckCircle weight="fill" /> {tool?.status ? `Command ${tool.status}` : "Approval unavailable"}</div>}</section>;
+  const action = tool?.name === "python_session" ? "Run Python" : "Run command";
+  return <section className="genui-card genui-approval"><header><ShieldCheck weight="fill" /><div><small>Approval required · {block.risk} risk</small><strong>{block.title}</strong></div></header><code>{block.description}</code>{pending ? <footer><button type="button" onClick={() => onReject(block.toolCallId)}>Reject</button><button type="button" className="genui-primary" onClick={() => onApprove(block.toolCallId)}>{action}</button></footer> : <div className="genui-complete"><CheckCircle weight="fill" /> {tool?.status ? `Tool ${tool.status}` : "Approval unavailable"}</div>}</section>;
 }
 
 function formatCell(value: string | number | boolean | null | undefined): string {

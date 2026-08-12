@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelMessage } from "./db";
-import { appendAssistantToolRequest, pendingBashCommand, toChatCompletionMessages } from "./model-protocol";
+import { appendAssistantToolRequest, pendingApprovedTool, pendingBashCommand, toChatCompletionMessages } from "./model-protocol";
 
 describe("model tool-call protocol", () => {
   it("preserves the provider tool-call ID through an approval continuation", () => {
@@ -21,5 +21,15 @@ describe("model tool-call protocol", () => {
     const messages: ModelMessage[] = [];
     appendAssistantToolRequest(messages, "", [{ id: "call_bash_1", name: "bash", input: { command: "printf done" } }]);
     expect(() => pendingBashCommand(messages, "different-id")).toThrow("could not be restored safely");
+  });
+
+  it("restores an approved Python cell without confusing it with Bash", () => {
+    const messages: ModelMessage[] = [];
+    appendAssistantToolRequest(messages, "", [{ id: "call_python_1", name: "python_session", input: { code: "x = 41\nx + 1" } }]);
+    expect(pendingApprovedTool(messages, "call_python_1")).toEqual({
+      name: "python_session",
+      input: { code: "x = 41\nx + 1" },
+    });
+    expect(() => pendingBashCommand(messages, "call_python_1")).toThrow("Bash request");
   });
 });

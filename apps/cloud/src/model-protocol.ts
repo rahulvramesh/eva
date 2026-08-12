@@ -31,15 +31,22 @@ export function toChatCompletionMessages(messages: ModelMessage[]): ChatCompleti
   });
 }
 
-export function pendingBashCommand(messages: ModelMessage[], toolCallId: string): string {
+export function pendingApprovedTool(messages: ModelMessage[], toolCallId: string): { name: "bash" | "python_session"; input: Record<string, unknown> } {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const request = messages[index]?.tool_calls?.find((candidate) => candidate.id === toolCallId);
-    if (request?.function.name !== "bash") continue;
+    if (!request || (request.function.name !== "bash" && request.function.name !== "python_session")) continue;
     const input = parseObject(request.function.arguments);
-    if (typeof input.command === "string" && input.command.trim()) return input.command;
+    if (request.function.name === "bash" && typeof input.command === "string" && input.command.trim()) return { name: "bash", input };
+    if (request.function.name === "python_session" && typeof input.code === "string" && input.code.trim()) return { name: "python_session", input };
     break;
   }
-  throw new Error("The approved Bash request could not be restored safely.");
+  throw new Error("The approved tool request could not be restored safely.");
+}
+
+export function pendingBashCommand(messages: ModelMessage[], toolCallId: string): string {
+  const request = pendingApprovedTool(messages, toolCallId);
+  if (request.name !== "bash") throw new Error("The approved Bash request could not be restored safely.");
+  return String(request.input.command);
 }
 
 function parseObject(value: string): Record<string, unknown> {

@@ -37,6 +37,8 @@ Eva Cloud provides the canonical synced chat and automatically discovers connect
 - up to three chats can stream concurrently, with per-chat stop controls across cloud and connected Pi devices;
 - Vectorize retrieves relevant long-term memories for each prompt;
 - Bash runs only after explicit approval in an isolated Sandbox container;
+- Python cells run only after explicit approval in a stateful IPython context scoped to the current chat; variables and imports remain available while the Sandbox is warm;
+- every Python cell is journaled directly to R2 under `/workspace/data/chats/<chat-id>/python/cells`, independently of the live kernel lifecycle;
 - each user gets a credential-less, prefix-scoped R2 mount at `/workspace/data` so cloud Bash files survive container sleep;
 - `web_fetch` accepts public HTTP(S) text/JSON/XML, revalidates redirects, blocks local/private targets, and bounds time and response size.
 - device execution uses an outbound-only authenticated WebSocket; no inbound port, router configuration, or Cloudflare Tunnel to the laptop is required;
@@ -75,7 +77,7 @@ pnpm cloud:migrate
 pnpm cloud:deploy
 ```
 
-The complete reproducible setup, migration, validation, rollback, task recovery, and reminder email instructions are in [`docs/REDEPLOYMENT.md`](docs/REDEPLOYMENT.md). Reminder behavior and failure semantics are in [`docs/REMINDERS.md`](docs/REMINDERS.md). The typed UI contract, security boundary, lifecycle, and extension checklist are in [`docs/GENERATIVE_UI.md`](docs/GENERATIVE_UI.md).
+The complete reproducible setup, migration, validation, rollback, task recovery, and reminder email instructions are in [`docs/REDEPLOYMENT.md`](docs/REDEPLOYMENT.md). Reminder behavior and failure semantics are in [`docs/REMINDERS.md`](docs/REMINDERS.md). The typed UI contract, security boundary, lifecycle, and extension checklist are in [`docs/GENERATIVE_UI.md`](docs/GENERATIVE_UI.md). Python session behavior, persistence, and acceptance checks are in [`docs/PYTHON_SESSIONS.md`](docs/PYTHON_SESSIONS.md).
 
 For Cloudflare Access, add both secrets and put an Access policy in front of the Worker. Token authentication remains useful for Electron and recovery:
 

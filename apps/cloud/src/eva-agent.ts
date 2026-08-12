@@ -49,10 +49,10 @@ import {
   explicitlyRequestsMemory,
   isVerifiedMemoryReceipt,
 } from "./memory-policy";
-import { runBash, runWebFetch } from "./tools";
+import { runBash, runPython, runWebFetch } from "./tools";
 import { isPrivateCapableModel, shouldRouteToDevice } from "./routing";
 import { consumeChatCompletionStream } from "./model-stream";
-import { appendAssistantToolRequest, pendingBashCommand, toChatCompletionMessages } from "./model-protocol";
+import { appendAssistantToolRequest, pendingApprovedTool, toChatCompletionMessages } from "./model-protocol";
 import { redactSensitiveText, redactToolInput } from "./tool-security";
 import { ChatRunRegistry } from "./chat-run-registry";
 import {
@@ -91,6 +91,7 @@ type PendingDeviceTurn = {
 type PreferredDeviceModel = { deviceId: string; provider: string; modelId: string; thinkingLevel: AgentSettings["thinkingLevel"]; systemInstructions: string };
 
 const bashInputSchema = z.object({ command: z.string().trim().min(1).max(20_000) });
+const pythonInputSchema = z.object({ code: z.string().trim().min(1).max(40_000) });
 const webFetchInputSchema = z.object({ url: z.string().trim().min(1).max(8_000) });
 const rememberInputSchema = z.object({
   kind: z.enum(["preference", "profile", "project", "instruction", "fact"]),
@@ -138,6 +139,14 @@ const MODEL_TOOLS = [
       name: "bash",
       description: "Run a shell command in Eva's isolated cloud workspace. The user must approve every invocation before execution.",
       parameters: { type: "object", properties: { command: { type: "string", description: "The Bash command to execute." } }, required: ["command"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "python_session",
+      description: "Run Python in a stateful per-chat IPython context inside Eva's isolated cloud workspace. Use it for arithmetic, data analysis, JSON/CSV transformations, plots, algorithms, or when a shell utility is unavailable. Variables and imports remain available while the session is warm; every cell is also saved in the durable workspace. The user must approve every invocation.",
+      parameters: { type: "object", properties: { code: { type: "string", description: "The Python code to execute as the next cell in this chat's session." } }, required: ["code"] },
     },
   },
   {
@@ -886,7 +895,7 @@ export class EvaAgent extends DurableObject<Env> {
       appendAssistantToolRequest(messages, result.response ?? streamedResponse, toolCalls);
 
       for (const request of toolCalls) {
-        const needsApproval = request.name === "bash";
+        const needsApproval = request.name === "bash" || request.name === "python_session";
         const toolCall = await createToolCall(
           this.env.DB,
           userId,
@@ -903,14 +912,14 @@ export class EvaAgent extends DurableObject<Env> {
             id: crypto.randomUUID(),
             kind: "approval",
             toolCallId: toolCall.id,
-            title: "Run command?",
-            description: redactSensitiveText(String(request.input.command ?? "This command will run in Eva's isolated cloud workspace.")),
+            title: request.name === "python_session" ? "Run Python?" : "Run command?",
+            description: redactSensitiveText(String(request.name === "python_session" ? request.input.code : request.input.command ?? "This tool will run in Eva's isolated cloud workspace.")),
             risk: "medium",
             createdAt: new Date().toISOString(),
           }));
           await saveApproval(this.env.DB, userId, chatId, assistantMessageId, toolCall.id, request.id, messages);
           await updateMessage(this.env.DB, userId, chatId, assistantMessageId, { content, status: "complete" });
-          await audit(this.env.DB, userId, "tool.approval.requested", toolCall.id, { tool: "bash" });
+          await audit(this.env.DB, userId, "tool.approval.requested", toolCall.id, { tool: request.name });
           this.broadcast("run.status", { chatId, status: "idle" });
           return;
         }
@@ -1034,17 +1043,19 @@ export class EvaAgent extends DurableObject<Env> {
     try {
       toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "running", "");
       this.broadcast("tool.update", { chatId: approval.chatId, toolCall });
-      const command = pendingBashCommand(approval.modelMessages, approval.modelToolCallId);
+      const approved = pendingApprovedTool(approval.modelMessages, approval.modelToolCallId);
       let toolResult: string;
       try {
-        toolResult = redactSensitiveText(await runBash(this.env, userId, command));
+        toolResult = approved.name === "bash"
+          ? redactSensitiveText(await runBash(this.env, userId, bashInputSchema.parse(approved.input).command))
+          : redactSensitiveText(await runPython(this.env, this.ctx.storage, userId, approval.chatId, pythonInputSchema.parse(approved.input).code));
         toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "complete", toolResult);
       } catch (error) {
         toolResult = `Tool failed: ${redactSensitiveText(errorMessage(error))}`;
         toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "error", toolResult);
       }
       this.broadcast("tool.update", { chatId: approval.chatId, toolCall });
-      await audit(this.env.DB, userId, "tool.approved", toolCallId, { tool: "bash" });
+      await audit(this.env.DB, userId, "tool.approved", toolCallId, { tool: approved.name });
       const chat = await getChat(this.env.DB, userId, approval.chatId);
       const assistant = chat.messages.find((message) => message.id === approval.assistantMessageId);
       approval.modelMessages.push({ role: "tool", content: toolResult, tool_call_id: approval.modelToolCallId });
@@ -1216,7 +1227,7 @@ function buildModelMessages(settings: AgentSettings, memories: Awaited<ReturnTyp
     ? `\n\nRelevant long-term memories:\n${memories.map((memory) => `- [${memory.kind}] ${memory.content}`).join("\n")}`
     : "";
   return [
-    { role: "system", content: `${settings.systemInstructions}\n\nCurrent UTC time: ${new Date().toISOString()}. The user's configured timezone is ${timezone}. Use it for relative or unspecified reminder times; only override it when the user names another timezone.\n\nUse present_plan for trackable multi-step work, present_choice when the next step needs a user decision, and present_table for structured comparisons. Do not duplicate a generated card as a Markdown list or table.\n\n${MEMORY_SAFETY_INSTRUCTION}${memoryContext}` },
+    { role: "system", content: `${settings.systemInstructions}\n\nCurrent UTC time: ${new Date().toISOString()}. The user's configured timezone is ${timezone}. Use it for relative or unspecified reminder times; only override it when the user names another timezone.\n\nExecution capabilities: use python_session for calculations, algorithms, CSV/JSON analysis, plotting, and as a reliable alternative when a shell utility is missing. Python state is isolated per chat and remains available while its session is warm; durable files and automatically saved cells live under /workspace/data/chats. Use bash for filesystem, Git, builds, installed programs, and package management. Use web_fetch for public web content. Never pretend a tool succeeded before receiving its result.\n\nUse present_plan for trackable multi-step work, present_choice when the next step needs a user decision, and present_table for structured comparisons. Do not duplicate a generated card as a Markdown list or table.\n\n${MEMORY_SAFETY_INSTRUCTION}${memoryContext}` },
     ...history.slice(-40).map((message) => ({ role: message.role, content: message.content } as ModelMessage)),
   ];
 }

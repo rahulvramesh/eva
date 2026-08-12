@@ -1039,7 +1039,8 @@ function ReminderSettings({
 function ToolCallRow({ toolCall, onApprove, onReject }: { toolCall: ToolCall; onApprove: () => void; onReject: () => void }) {
   const preview = toolCallPreview(toolCall);
   const isWeb = toolCall.name === "web_fetch";
-  const Icon = isWeb ? GlobeHemisphereWest : toolCall.name === "schedule_reminder" ? CalendarBlank : TerminalWindow;
+  const isPython = toolCall.name === "python_session";
+  const Icon = isWeb ? GlobeHemisphereWest : toolCall.name === "schedule_reminder" ? CalendarBlank : isPython ? Code : TerminalWindow;
   const StatusIcon = toolCall.status === "error" || toolCall.status === "rejected" ? WarningCircle : toolCall.status === "complete" ? CheckCircle : Circle;
   return (
     <details className={`tool-call ${toolCall.status}`}>
@@ -1057,9 +1058,9 @@ function ToolCallRow({ toolCall, onApprove, onReject }: { toolCall: ToolCall; on
         <div><span>Output</span><pre>{toolCall.output || (toolCall.status === "running" ? "Waiting for output…" : "No output")}</pre></div>
         {toolCall.status === "pending" && (
           <div className="tool-approval">
-            <p>This command will run inside Eva’s isolated cloud workspace.</p>
+            <p>{isPython ? "This Python cell will run in this chat’s isolated session." : "This command will run inside Eva’s isolated cloud workspace."}</p>
             <button type="button" className="reject" onClick={onReject}>Reject</button>
-            <button type="button" className="approve" onClick={onApprove}>Run command</button>
+            <button type="button" className="approve" onClick={onApprove}>{isPython ? "Run Python" : "Run command"}</button>
           </div>
         )}
       </div>
@@ -1137,6 +1138,7 @@ function Message({ message, toolCalls, reminders, onChoice, onApprove, onReject,
 
 function toolCallPreview(toolCall: ToolCall): string {
   const value = toolCall.name === "bash" ? toolCall.input.command
+    : toolCall.name === "python_session" ? toolCall.input.code
     : toolCall.name === "web_fetch" ? toolCall.input.url
       : toolCall.name === "schedule_reminder" ? `${String(toolCall.input.title ?? "Reminder")} · ${String(toolCall.input.run_at ?? "")}`
         : undefined;
@@ -1145,6 +1147,7 @@ function toolCallPreview(toolCall: ToolCall): string {
 
 function toolCallLabel(toolCall: ToolCall): string {
   if (toolCall.name === "bash") return "Ran command";
+  if (toolCall.name === "python_session") return "Ran Python";
   if (toolCall.name === "web_fetch") return "Fetched web page";
   if (toolCall.name === "schedule_reminder") return "Scheduled reminder";
   return toolCall.name.replace(/[_-]+/g, " ");

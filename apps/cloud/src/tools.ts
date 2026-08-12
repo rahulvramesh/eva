@@ -1,8 +1,15 @@
-import { getSandbox } from "@cloudflare/sandbox";
+import { getSandbox, type CodeContext } from "@cloudflare/sandbox";
 import { parsePublicUrl } from "./web-security";
+import { formatPythonExecution } from "./python-output";
 
 const MAX_TOOL_OUTPUT = 64 * 1024;
 const MAX_FETCH_BYTES = 512 * 1024;
+const PYTHON_CONTEXT_PREFIX = "python-context:";
+
+export type PythonContextStore = {
+  get<T>(key: string): Promise<T | undefined>;
+  put<T>(key: string, value: T): Promise<void>;
+};
 
 export async function runBash(env: Env, userId: string, command: string): Promise<string> {
   if (!command.trim()) throw new Error("The Bash command was empty.");
@@ -18,11 +25,85 @@ export async function runBash(env: Env, userId: string, command: string): Promis
   return output || `Command completed with exit code ${result.exitCode}.`;
 }
 
+export async function runPython(
+  env: Env,
+  contextStore: PythonContextStore,
+  userId: string,
+  chatId: string,
+  code: string,
+): Promise<string> {
+  if (!code.trim()) throw new Error("The Python code was empty.");
+  if (code.length > 40_000) throw new Error("The Python code is too long.");
+  const safeChatId = safePathSegment(chatId);
+  const sandbox = getUserSandbox(env, userId, "python");
+  const workspace = `/workspace/python-chats/${safeChatId}`;
+  const durableWorkspace = `/workspace/data/chats/${safeChatId}/python`;
+
+  const { context, status } = await getOrCreatePythonContext(sandbox, contextStore, env, userId, chatId, workspace);
+  const cellName = `${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 8)}.py`;
+  const cellPath = `${durableWorkspace}/cells/${cellName}`;
+  await env.WORKSPACES.put(`users/${userId}/workspace/chats/${safeChatId}/python/cells/${cellName}`, `${code.trimEnd()}\n`, {
+    httpMetadata: { contentType: "text/x-python; charset=utf-8" },
+    customMetadata: { chatId, kind: "python-cell" },
+  });
+  const result = await sandbox.runCode(code, { context, timeout: 120_000 });
+  const output = formatPythonExecution(result);
+  if (result.error) throw new Error(`${pythonSessionHeader(status, result.executionCount, cellPath)}\n${output}`);
+  return `${pythonSessionHeader(status, result.executionCount, cellPath)}\n${output}`.slice(0, MAX_TOOL_OUTPUT);
+}
+
+async function getOrCreatePythonContext(
+  sandbox: ReturnType<typeof getSandbox>,
+  contextStore: PythonContextStore,
+  env: Env,
+  userId: string,
+  chatId: string,
+  workspace: string,
+): Promise<{ context: CodeContext; status: "warm" | "new" | "restored" }> {
+  const key = `${PYTHON_CONTEXT_PREFIX}${chatId}`;
+  const storedId = await contextStore.get<string>(key);
+  const active = await sandbox.listCodeContexts();
+  const existing = storedId ? active.find((context) => context.id === storedId && context.language === "python") : undefined;
+  if (existing) return { context: existing, status: "warm" };
+  try {
+    await ensurePersistentWorkspace(sandbox, env, userId);
+  } catch (error) {
+    console.warn(JSON.stringify({ event: "eva.python.workspace_mount.unavailable", user: userId.slice(0, 12), error: error instanceof Error ? error.message : "mount failed" }));
+  }
+  await sandbox.mkdir(workspace, { recursive: true });
+  const context = await sandbox.createCodeContext({ language: "python", cwd: workspace, timeout: 30_000 });
+  await contextStore.put(key, context.id);
+  return { context, status: storedId ? "restored" : "new" };
+}
+
+function pythonSessionHeader(status: "warm" | "new" | "restored", executionCount: number | undefined, cellPath: string): string {
+  const state = status === "restored"
+    ? "restored after the previous live variables expired; durable workspace files are still available"
+    : status === "warm" ? "warm; prior variables and imports in this chat are available" : "new";
+  const count = executionCount ? `; execution ${executionCount}` : "";
+  return `[Python session: ${state}${count}; cell saved to ${cellPath}]`;
+}
+
+function safePathSegment(value: string): string {
+  const safe = value.replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 100);
+  if (!safe) throw new Error("The chat identifier is not valid for a Python workspace.");
+  return safe;
+}
+
+function getUserSandbox(env: Env, userId: string, workload: "bash" | "python") {
+  return getSandbox(env.Sandbox, `eva-tools-v3-${userId.slice(0, 32)}`, {
+    sleepAfter: "10m",
+    labels: { application: "eva", workload, user: userId.slice(0, 12) },
+  });
+}
+
 async function ensurePersistentWorkspace(
   sandbox: ReturnType<typeof getSandbox>,
   env: Env,
   userId: string,
 ): Promise<void> {
+  const mounted = await sandbox.exec("mountpoint -q /workspace/data", { timeout: 10_000 });
+  if (mounted.success) return;
   try {
     const localDev = (env as Env & { EVA_LOCAL_DEV?: string }).EVA_LOCAL_DEV === "true";
     await sandbox.mountBucket("WORKSPACES", "/workspace/data", {
