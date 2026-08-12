@@ -51,6 +51,7 @@ export type PendingApproval = {
   chatId: string;
   assistantMessageId: string;
   toolCallId: string;
+  modelToolCallId: string;
   modelMessages: ModelMessage[];
 };
 
@@ -315,37 +316,44 @@ export async function saveApproval(
   chatId: string,
   assistantMessageId: string,
   toolCallId: string,
+  modelToolCallId: string,
   modelMessages: ModelMessage[],
 ): Promise<void> {
   const now = new Date().toISOString();
   await db.prepare(`
     INSERT INTO pending_approvals
-      (id, user_id, chat_id, assistant_message_id, tool_call_id, model_messages_json, status, created_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)
-  `).bind(crypto.randomUUID(), userId, chatId, assistantMessageId, toolCallId, JSON.stringify(modelMessages), now).run();
+      (id, user_id, chat_id, assistant_message_id, tool_call_id, model_tool_call_id, model_messages_json, status, created_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8)
+  `).bind(crypto.randomUUID(), userId, chatId, assistantMessageId, toolCallId, modelToolCallId, JSON.stringify(modelMessages), now).run();
 }
 
 export async function takeApproval(db: D1Database, userId: string, toolCallId: string, status: "approved" | "rejected"): Promise<PendingApproval> {
   const row = await db.prepare(`
-    SELECT id, chat_id, assistant_message_id, tool_call_id, model_messages_json
+    SELECT id, chat_id, assistant_message_id, tool_call_id, model_tool_call_id, model_messages_json
     FROM pending_approvals WHERE user_id = ?1 AND tool_call_id = ?2 AND status = 'pending'
   `).bind(userId, toolCallId).first<{
     id: string;
     chat_id: string;
     assistant_message_id: string;
     tool_call_id: string;
+    model_tool_call_id: string | null;
     model_messages_json: string;
   }>();
   if (!row) throw new Error("That approval is no longer pending.");
-  await db.prepare(`
-    UPDATE pending_approvals SET status = ?1, resolved_at = ?2 WHERE id = ?3 AND status = 'pending'
+  const modelMessages = parseModelMessages(row.model_messages_json);
+  const updated = await db.prepare(`
+    UPDATE pending_approvals
+    SET status = ?1, resolved_at = ?2, model_messages_json = '[]'
+    WHERE id = ?3 AND status = 'pending'
   `).bind(status, new Date().toISOString(), row.id).run();
+  if (!updated.meta.changes) throw new Error("That approval is no longer pending.");
   return {
     id: row.id,
     chatId: row.chat_id,
     assistantMessageId: row.assistant_message_id,
     toolCallId: row.tool_call_id,
-    modelMessages: parseModelMessages(row.model_messages_json),
+    modelToolCallId: row.model_tool_call_id ?? row.tool_call_id,
+    modelMessages,
   };
 }
 

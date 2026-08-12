@@ -52,6 +52,8 @@ import {
 import { runBash, runWebFetch } from "./tools";
 import { isPrivateCapableModel, shouldRouteToDevice } from "./routing";
 import { consumeChatCompletionStream } from "./model-stream";
+import { appendAssistantToolRequest, pendingBashCommand, toChatCompletionMessages } from "./model-protocol";
+import { redactSensitiveText, redactToolInput } from "./tool-security";
 import { ChatRunRegistry } from "./chat-run-registry";
 import {
   createReminder,
@@ -881,8 +883,9 @@ export class EvaAgent extends DurableObject<Env> {
         this.streamText(chatId, assistantMessageId, streamedResponse);
       }
 
+      appendAssistantToolRequest(messages, result.response ?? streamedResponse, toolCalls);
+
       for (const request of toolCalls) {
-        messages.push({ role: "assistant", content: `Requested tool ${request.name} with ${JSON.stringify(request.input)}.` });
         const needsApproval = request.name === "bash";
         const toolCall = await createToolCall(
           this.env.DB,
@@ -890,7 +893,7 @@ export class EvaAgent extends DurableObject<Env> {
           chatId,
           assistantMessageId,
           request.name,
-          request.input,
+          redactToolInput(request.input),
           needsApproval ? "pending" : "running",
         );
         this.broadcast("tool.call", { chatId, toolCall });
@@ -901,11 +904,11 @@ export class EvaAgent extends DurableObject<Env> {
             kind: "approval",
             toolCallId: toolCall.id,
             title: "Run command?",
-            description: String(request.input.command ?? "This command will run in Eva's isolated cloud workspace."),
+            description: redactSensitiveText(String(request.input.command ?? "This command will run in Eva's isolated cloud workspace.")),
             risk: "medium",
             createdAt: new Date().toISOString(),
           }));
-          await saveApproval(this.env.DB, userId, chatId, assistantMessageId, toolCall.id, messages);
+          await saveApproval(this.env.DB, userId, chatId, assistantMessageId, toolCall.id, request.id, messages);
           await updateMessage(this.env.DB, userId, chatId, assistantMessageId, { content, status: "complete" });
           await audit(this.env.DB, userId, "tool.approval.requested", toolCall.id, { tool: "bash" });
           this.broadcast("run.status", { chatId, status: "idle" });
@@ -1027,22 +1030,39 @@ export class EvaAgent extends DurableObject<Env> {
       throw error;
     }
     this.broadcast("run.status", { chatId: approval.chatId, status: "running" });
+    let toolCall: ToolCall | undefined;
     try {
-      let toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "running", "");
+      toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "running", "");
       this.broadcast("tool.update", { chatId: approval.chatId, toolCall });
-      const command = bashInputSchema.parse(toolCall.input).command;
-      const output = await runBash(this.env, userId, command);
-      toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "complete", output);
+      const command = pendingBashCommand(approval.modelMessages, approval.modelToolCallId);
+      let toolResult: string;
+      try {
+        toolResult = redactSensitiveText(await runBash(this.env, userId, command));
+        toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "complete", toolResult);
+      } catch (error) {
+        toolResult = `Tool failed: ${redactSensitiveText(errorMessage(error))}`;
+        toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "error", toolResult);
+      }
       this.broadcast("tool.update", { chatId: approval.chatId, toolCall });
       await audit(this.env.DB, userId, "tool.approved", toolCallId, { tool: "bash" });
       const chat = await getChat(this.env.DB, userId, approval.chatId);
       const assistant = chat.messages.find((message) => message.id === approval.assistantMessageId);
-      approval.modelMessages.push({ role: "tool", content: output, tool_call_id: toolCallId });
+      approval.modelMessages.push({ role: "tool", content: toolResult, tool_call_id: approval.modelToolCallId });
       await this.continueTurn(userId, approval.chatId, approval.assistantMessageId, approval.modelMessages, assistant?.content ?? "");
     } catch (error) {
-      const output = errorMessage(error);
-      const toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "error", output);
-      this.broadcast("tool.update", { chatId: approval.chatId, toolCall });
+      const output = redactSensitiveText(errorMessage(error));
+      if (!toolCall || !["complete", "error", "rejected"].includes(toolCall.status)) {
+        toolCall = await updateToolCall(this.env.DB, userId, toolCallId, "error", output);
+        this.broadcast("tool.update", { chatId: approval.chatId, toolCall });
+      }
+      const chat = await getChat(this.env.DB, userId, approval.chatId);
+      const assistant = chat.messages.find((message) => message.id === approval.assistantMessageId);
+      const failure = `I couldn’t complete the response after that command: ${output}`;
+      await updateMessage(this.env.DB, userId, approval.chatId, approval.assistantMessageId, {
+        content: `${assistant?.content ?? ""}\n\n${failure}`.trim(),
+        status: "error",
+      });
+      this.broadcast("assistant.delta", { chatId: approval.chatId, messageId: approval.assistantMessageId, delta: `\n\n${failure}` });
       this.broadcast("server.error", { code: "TOOL_FAILED", message: output });
       this.broadcast("run.status", { chatId: approval.chatId, status: "error" });
     } finally {
@@ -1209,12 +1229,7 @@ async function runModel(
   onText: (delta: string) => void,
 ): Promise<{ response?: string; tool_calls?: ChatCompletionMessageToolCall[] }> {
   const input: ChatCompletionsMessagesInput & { stream: true } = {
-    messages: messages.map((message): ChatCompletionMessageParam => {
-      if (message.role === "system") return { role: "system", content: message.content ?? "" };
-      if (message.role === "assistant") return { role: "assistant", content: message.content ?? "" };
-      if (message.role === "tool") return { role: "tool", content: message.content ?? "", tool_call_id: message.tool_call_id ?? "tool" };
-      return { role: "user", content: message.content ?? "" };
-    }),
+    messages: toChatCompletionMessages(messages),
     tools: MODEL_TOOLS,
     max_tokens: 4_096,
     temperature: settings.thinkingLevel === "off" ? 0.3 : 0.5,
